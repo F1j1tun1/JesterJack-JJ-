@@ -1,0 +1,21 @@
+# Keep source, shaders, documentation and scripts consistent across Windows/Linux.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.wav binary
+*.ogg binary
+*.mp3 binary
+*.tga binary
+*.exe binary
+*.zip binary
+*.pdf binary
+*.ttf binary
+
+# Preserve the upstream font license verbatim, including its original spaces.
+assets/fonts/OFL-*.txt -whitespace
+
+third_party/** linguist-vendored

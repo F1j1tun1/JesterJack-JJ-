@@ -129,13 +129,16 @@ void Presentation::enterStage() {
         break;
     case Kind::Alteration:
         break;
-    case Kind::RewardBase:
+    case Kind::RewardBase: {
+        const int priorCoins = visible_.coins;
         visible_ = final_;
+        visible_.coins = priorCoins;
         dealerRevealed_ = true;
         rewardStep_ = 0;
         celebration_ = 1.0f;
         cues_.push_back(final_.roundScore >= final_.goal ? Cue::RoundCleared : Cue::HandWon);
         break;
+    }
     case Kind::RewardEffect:
         rewardStep_ = static_cast<int>(current.index) + 1;
         rewardVisibleEffects_ = current.index + 1;
@@ -143,6 +146,7 @@ void Presentation::enterStage() {
             legendPulse_ = 1.0f;
         break;
     case Kind::RewardTotal:
+        visible_.coins = final_.coins;
         rewardStep_ = static_cast<int>(final_.score.appliedEffects.size()) + 1;
         rewardVisibleEffects_ = final_.score.appliedEffects.size();
         celebration_ = 1.0f;

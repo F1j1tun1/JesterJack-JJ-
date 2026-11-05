@@ -1,6 +1,7 @@
 #include "Renderer.hpp"
 #include "ArtTexture.hpp"
 #include "BandModel.hpp"
+#include "presentation/CarPass.hpp"
 
 #include <glad/gl.h>
 #include <glm/glm.hpp>
@@ -1209,9 +1210,8 @@ struct Renderer::Impl {
 
     void drawMenuSedan(const glm::mat4& street, float time, bool animate) {
         if (!animate) return; // Parked beyond the visible stretch of road.
-        const float phase = std::fmod(std::max(time, 0.0f), 32.0f);
-        if (phase > 9.4f) return;
-        const float distance = -18.0f + phase / 9.4f * 36.0f;
+        if (!presentation::CarPass::visible(time)) return;
+        const float distance = static_cast<float>(presentation::CarPass::distance(time));
         const glm::mat4 car = street * glm::translate(glm::mat4(1), drivePoint(distance,.58f))
             * glm::rotate(glm::mat4(1),-std::atan(driveSlope(distance)),glm::vec3(0,1,0));
         const glm::vec3 paint{.033f, .031f, .050f}, rubber{.009f, .010f, .012f};

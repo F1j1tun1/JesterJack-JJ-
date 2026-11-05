@@ -124,15 +124,15 @@ inline void panelFrame(ImDrawList* draw, ImVec2 pos, ImVec2 size, bool prominent
 // Call immediately after the corresponding item so keyboard focus can share its
 // visible gold outline. Pointer inspection is never used to activate a button.
 inline void buttonFrame(ImDrawList* draw, ImVec2 min, ImVec2 max,
-                        bool hovered, bool active, bool disabled) {
+                        float hover, float press, bool disabled) {
     if (!draw || max.x - min.x < 28 || max.y - min.y < 18) return;
     const bool focused = !disabled && ImGui::GetIO().NavVisible && ImGui::IsItemFocused();
-    const float strength = disabled ? .23f : active ? .86f : hovered || focused ? .76f : .30f;
+    const float strength = disabled ? .23f : .30f + .46f * hover + .10f * press;
     const auto edge = ink(.91f, .74f, .44f, strength);
     draw->AddRect({min.x + 1, min.y + 1}, {max.x - 1, max.y - 1}, edge, 4, 0,
                   focused ? 1.6f : 1.0f);
     draw->AddLine({min.x + 9, min.y + 3}, {max.x - 9, min.y + 3},
-                  ink(.98f, .87f, .64f, disabled ? .10f : active ? .09f : .20f));
+                  ink(.98f, .87f, .64f, disabled ? .10f : .20f + .12f * hover - .15f * press));
     if (max.x - min.x >= 96 && max.y - min.y >= 32) {
         const float y = max.y - 6;
         diamond(draw, {min.x + 7, y}, 1.6f, ink(.64f, .27f, .36f, strength));

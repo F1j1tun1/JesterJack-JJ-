@@ -97,9 +97,14 @@ def track_beats(env, period, tightness=100.0):
 
 def curve(values, seconds):
     """Mean over 1/CURVE_RATE s windows, scaled so the 95th percentile is 1."""
-    step = int(round(FPS / CURVE_RATE))
     count = int(seconds * CURVE_RATE)
-    out = np.array([values[i * step:(i + 1) * step].mean() if i * step < len(values) else 0.0 for i in range(count)])
+    # 50 analysis frames / 4 samples is 12.5, not a fixed 12-frame stride.
+    # Alternating exact boundaries prevents accumulated drift in long songs.
+    out = np.array([
+        values[int(i * FPS / CURVE_RATE):int((i + 1) * FPS / CURVE_RATE)].mean()
+        if int(i * FPS / CURVE_RATE) < len(values) else 0.0
+        for i in range(count)
+    ])
     ref = np.percentile(out, 95) + 1e-9
     return np.clip(out / ref, 0.0, 1.0)
 

@@ -36,6 +36,10 @@ namespace {
 
 std::wstring widen(const std::string& text) { return std::wstring(text.begin(), text.end()); } // Aliases are ASCII.
 
+float volumeOr(float value, float fallback) {
+    return std::isfinite(value) ? std::clamp(value, 0.0f, 1.0f) : fallback;
+}
+
 // MP3 through the OS: `open "file" type mpegvideo alias NAME`, then play/stop/setaudio/status.
 class MciBackend final : public Backend {
 public:
@@ -104,13 +108,16 @@ struct Engine::Impl {
     std::condition_variable wake;
     std::deque<Command> queue;
     bool quit = false;
+    float requestedMusic = 1.0f, requestedEffects = 1.0f; // Guarded by mutex; one latest pair, no command backlog.
+    bool volumesDirty = true;
     std::atomic<int> requestedMode{-1}; // Callers repeat these every frame; only changes are queued.
     std::atomic<int> requestedDuck{-1};
     std::chrono::steady_clock::time_point begin = std::chrono::steady_clock::now();
     MusicStatus status; // Guarded by `mutex`.
     std::thread worker;
 
-    explicit Impl(std::filesystem::path audioRoot) : root(std::move(audioRoot)) {
+    Impl(std::filesystem::path audioRoot, float music, float effects)
+        : root(std::move(audioRoot)), requestedMusic(volumeOr(music, 1.0f)), requestedEffects(volumeOr(effects, 1.0f)) {
         const std::uint32_t seed = std::random_device{}();
         worker = std::thread([this, seed] { run(seed); });
     }
@@ -133,16 +140,45 @@ struct Engine::Impl {
         wake.notify_one();
     }
 
+    void setVolumes(float music, float effects) {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            music = volumeOr(music, requestedMusic);
+            effects = volumeOr(effects, requestedEffects);
+            if (music == requestedMusic && effects == requestedEffects) return;
+            requestedMusic = music;
+            requestedEffects = effects;
+            volumesDirty = true;
+        }
+        wake.notify_one();
+    }
+
     void run(std::uint32_t seed) {
         MciBackend backend;
         Mixer mixer(backend, root, seed);
+        const auto clock = [this] {
+            return std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+        };
+        // Opening the effect voices can take longer than the music startup grace.
+        mixer.tick(clock());
         std::unique_lock<std::mutex> lock(mutex);
         while (!quit) {
-            wake.wait_for(lock, std::chrono::milliseconds(50), [this] { return quit || !queue.empty(); });
+            wake.wait_for(lock, std::chrono::milliseconds(50), [this] { return quit || volumesDirty || !queue.empty(); });
+            if (quit) break;
+            if (volumesDirty) {
+                const float music = requestedMusic, effects = requestedEffects;
+                volumesDirty = false;
+                lock.unlock();
+                mixer.setVolumes(music, effects);
+                lock.lock();
+            }
             while (!queue.empty()) {
                 const Command command = queue.front();
                 queue.pop_front();
+                if (command.kind == Command::Kind::Music) status = MusicStatus{};
                 lock.unlock();
+                if (command.kind == Command::Kind::Music || command.kind == Command::Kind::CarStart ||
+                    command.kind == Command::Kind::CarStop) mixer.tick(clock());
                 switch (command.kind) {
                     case Command::Kind::Play: mixer.play(static_cast<Sfx>(command.value)); break;
                     case Command::Kind::Music: mixer.setMode(static_cast<MusicMode>(command.value)); break;
@@ -154,16 +190,18 @@ struct Engine::Impl {
             }
             if (quit) break;
             lock.unlock();
-            mixer.tick(std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count());
-            const MusicStatus sample = mixer.musicStatus();
+            mixer.tick(clock());
+            MusicStatus sample = mixer.musicStatus();
+            // MCI position/status queries may block; timestamp the result after them.
+            sample.sampledAt = clock();
             lock.lock();
             status = sample;
         }
     }
 };
 
-Engine::Engine(const std::filesystem::path& audioRoot, bool enabled)
-    : impl_(enabled ? std::make_unique<Impl>(audioRoot) : nullptr) {}
+Engine::Engine(const std::filesystem::path& audioRoot, bool enabled, float music, float effects)
+    : impl_(enabled ? std::make_unique<Impl>(audioRoot, music, effects) : nullptr) {}
 Engine::~Engine() = default;
 void Engine::play(Sfx sound) {
     if (impl_) impl_->post({Impl::Command::Kind::Play, static_cast<int>(sound)});
@@ -175,6 +213,9 @@ void Engine::setMusic(MusicMode mode) {
 void Engine::setDucked(bool ducked) {
     const int value = ducked ? 1 : 0;
     if (impl_ && impl_->requestedDuck.exchange(value) != value) impl_->post({Impl::Command::Kind::Duck, value});
+}
+void Engine::setVolumes(float music, float effects) {
+    if (impl_) impl_->setVolumes(music, effects);
 }
 void Engine::carPass(double offsetSeconds) {
     if (impl_) impl_->post({Impl::Command::Kind::CarStart, 0, offsetSeconds});
@@ -194,11 +235,12 @@ bool Engine::active() const { return impl_ != nullptr; }
 #else // Non-Windows builds keep the interface but stay silent.
 
 struct Engine::Impl {};
-Engine::Engine(const std::filesystem::path&, bool) {}
+Engine::Engine(const std::filesystem::path&, bool, float, float) {}
 Engine::~Engine() = default;
 void Engine::play(Sfx) {}
 void Engine::setMusic(MusicMode) {}
 void Engine::setDucked(bool) {}
+void Engine::setVolumes(float, float) {}
 void Engine::carPass(double) {}
 void Engine::carStop(double) {}
 Engine::MusicClock Engine::musicClock() const { return {}; }

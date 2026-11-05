@@ -13,7 +13,7 @@ namespace audio {
 // and disabled/headless runs are silent no-ops with the same interface.
 class Engine {
 public:
-    Engine(const std::filesystem::path& audioRoot, bool enabled);
+    Engine(const std::filesystem::path& audioRoot, bool enabled, float music = 1.0f, float effects = 1.0f);
     ~Engine();
     Engine(const Engine&) = delete;
     Engine& operator=(const Engine&) = delete;
@@ -21,6 +21,9 @@ public:
     void play(Sfx sound);
     void setMusic(MusicMode mode);
     void setDucked(bool ducked);
+    // Independent 0..1 master gains; rapid updates are coalesced on the playback thread.
+    // Non-finite values keep the corresponding channel unchanged (startup defaults to 1).
+    void setVolumes(float music, float effects);
     // Street ambience for the main menu: start the car-pass recording `offsetSeconds` into the file
     // (the caller aligns this with the car's position), or fade it out.
     void carPass(double offsetSeconds);

@@ -1,10 +1,14 @@
 #include "audio/Mixer.hpp"
 #include "audio/Playlist.hpp"
+#include "audio/Engine.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <set>
 #include <string>
@@ -32,10 +36,13 @@ public:
     std::vector<std::string> started; // File names, in start order.
     std::map<std::string, int> plays;  // Per file name.
     std::set<std::string> refuse;      // File names that fail to open.
+    int openAttempts = 0;
+    int volumeWrites = 0;
     std::vector<std::pair<std::string, double>> seeks; // playFrom calls: file name, seconds.
     double reportedPosition = -1.0;
 
     bool open(const std::string& alias, const std::filesystem::path& file) override {
+        ++openAttempts;
         if (refuse.count(file.filename().string())) return false;
         open_.insert(alias);
         files_[alias] = file;
@@ -49,7 +56,7 @@ public:
     }
     void stop(const std::string& alias) override { playing_[alias] = false; }
     void close(const std::string& alias) override { open_.erase(alias); playing_[alias] = false; }
-    void setVolume(const std::string& alias, float volume) override { volume_[alias] = volume; }
+    void setVolume(const std::string& alias, float volume) override { ++volumeWrites; volume_[alias] = volume; }
     bool playing(const std::string& alias) override { return open_.count(alias) && playing_[alias]; }
     void playFrom(const std::string& alias, double seconds) override {
         play(alias, false);
@@ -67,8 +74,10 @@ public:
 };
 
 std::filesystem::path makeAudioFolder(int soundtracks) {
-    const auto root = std::filesystem::temp_directory_path() / ("jj_audio_test_" + std::to_string(soundtracks));
-    std::filesystem::remove_all(root);
+    static std::size_t serial = 0;
+    const auto nonce = std::chrono::steady_clock::now().time_since_epoch().count();
+    const auto root = std::filesystem::temp_directory_path() /
+        ("jj_audio_test_" + std::to_string(nonce) + "_" + std::to_string(++serial));
     std::filesystem::create_directories(root / "music");
     std::filesystem::create_directories(root / "sfx");
     std::filesystem::create_directories(root / "ui");
@@ -196,6 +205,20 @@ void soundEffectsAndDucking() {
     check(overlapping == 2, "Quick repeats overlap on a second voice instead of cutting off");
     mixer.play(audio::Sfx::UiError);
     check(backend.plays["ui_error.mp3"] == 1, "UI sounds play too");
+    mixer.play(audio::Sfx::UiOpen);
+    mixer.play(audio::Sfx::UiClose);
+    mixer.play(audio::Sfx::UiSelection);
+    check(backend.plays["ui_open.mp3"] == 1 && backend.plays["ui_close.mp3"] == 1 &&
+          backend.plays["ui_selection.mp3"] == 1,
+          "Opening, closing and selection each keep their own supplied UI recording");
+    mixer.play(audio::Sfx::CardRoll);
+    check(backend.plays["card_roll.mp3"] == 1 && backend.plays["card_deal.mp3"] == 3,
+          "Drawing an extra card uses its separate roll recording");
+    bool dealTrimmed = true;
+    for (const auto& voice : backend.files_)
+        if (voice.second.filename() == "card_deal.mp3")
+            dealTrimmed = dealTrimmed && backend.volume_[voice.first] <= .9f;
+    check(dealTrimmed, "The original deal recording is played with headroom for decoder overshoot");
 
     mixer.setMode(audio::MusicMode::Game);
     check(backend.volume_["jjmusic"] == levels.music, "Music starts at its own level");
@@ -268,8 +291,77 @@ void musicStatusTracksTheSoundtrack() {
     status = mixer.musicStatus();
     check(status.position > 1.9 && status.position < 2.1, "Without a device position the clock falls back to elapsed time");
     mixer.setMode(audio::MusicMode::Silent);
+    check(!mixer.musicStatus().playing && mixer.musicStatus().track == -1,
+          "Changing mode invalidates the previous soundtrack clock immediately");
     mixer.tick(5.0);
     check(!mixer.musicStatus().playing, "Silence reports no track");
+    std::filesystem::remove_all(root);
+}
+
+void brokenTracksCannotHideThePlayableOne() {
+    const auto root = makeAudioFolder(5);
+    bool keptPlaying = true;
+    bool failedCycleIsBounded = true;
+    for (std::uint32_t seed = 0; seed < 60; ++seed) {
+        FakeBackend backend;
+        backend.refuse = {"soundtrack_1.mp3", "soundtrack_2.mp3", "soundtrack_3.mp3", "soundtrack_4.mp3"};
+        audio::Mixer mixer(backend, root, seed);
+        mixer.setMode(audio::MusicMode::Game);
+        for (int end = 1; end <= 30; ++end) {
+            keptPlaying = keptPlaying && mixer.currentTrack() == "soundtrack_5.mp3" && backend.playing("jjmusic");
+            const int before = backend.openAttempts;
+            backend.finishMusic();
+            mixer.tick(end * 2.0);
+            failedCycleIsBounded = failedCycleIsBounded && backend.openAttempts - before <= 5;
+        }
+        keptPlaying = keptPlaying && backend.plays["soundtrack_5.mp3"] == 31;
+    }
+    check(keptPlaying, "A single playable soundtrack keeps looping across shuffle boundaries despite four failed files");
+    check(failedCycleIsBounded, "Each replacement opens at most one candidate per discovered file");
+    FakeBackend broken;
+    broken.refuse = {"soundtrack_1.mp3", "soundtrack_2.mp3", "soundtrack_3.mp3", "soundtrack_4.mp3", "soundtrack_5.mp3", "main_theme.mp3"};
+    audio::Mixer mixer(broken, root, 3);
+    mixer.setMode(audio::MusicMode::Game);
+    const int attempts = broken.openAttempts;
+    for (int i = 0; i < 100; ++i) mixer.tick(i * 2.0);
+    check(broken.openAttempts == attempts && mixer.currentTrack().empty(),
+          "A wholly failed soundtrack cycle stays silent without retrying every frame");
+    mixer.setMode(audio::MusicMode::Menu);
+    for (int i = 100; i < 200; ++i) mixer.tick(i * 2.0);
+    check(broken.openAttempts == attempts + 3,
+          "An unreadable menu theme is retried only a bounded number of times");
+    std::filesystem::remove_all(root);
+}
+
+void carCompletionAndInvalidRequestsAreHarmless() {
+    const auto root = makeAudioFolder(1);
+    FakeBackend backend;
+    audio::Mixer mixer(backend, root, 4);
+    mixer.tick(10.0);
+    mixer.startCarPass(0.0);
+    backend.playing_["jjcar"] = false;
+    mixer.tick(10.2);
+    check(mixer.carPassPlaying(), "A short startup status blip does not finish the car recording");
+    mixer.tick(11.1);
+    check(!mixer.carPassPlaying(), "Natural completion clears the car state without an explicit stop");
+    mixer.startCarPass(0.0);
+    mixer.stopCarPass(1.0);
+    mixer.tick(11.6);
+    const auto half = backend.volume_["jjcar"];
+    mixer.tick(10.0);
+    mixer.tick(std::numeric_limits<double>::quiet_NaN());
+    mixer.tick(std::numeric_limits<double>::infinity());
+    check(backend.volume_["jjcar"] == half && mixer.carPassPlaying(),
+          "Invalid or backwards clocks cannot amplify or corrupt a car fade");
+    mixer.startCarPass(std::numeric_limits<double>::infinity());
+    check(backend.seeks.back().second == 0.0, "A non-finite car offset is replaced by a valid start");
+    mixer.stopCarPass(std::numeric_limits<double>::quiet_NaN());
+    check(!mixer.carPassPlaying(), "A non-finite fade duration stops safely instead of producing NaN gain");
+    const auto plays = backend.started.size();
+    mixer.play(audio::Sfx::Count);
+    mixer.play(static_cast<audio::Sfx>(-1));
+    check(backend.started.size() == plays, "Invalid sound ids do not access or start any voice");
+    check(std::string(audio::sfxFile(audio::Sfx::Count)).empty(), "An invalid sound id has no mapped file");
     std::filesystem::remove_all(root);
 }
 
@@ -293,7 +385,7 @@ void missingFilesAreHarmless() {
     }
     check(backend.open_.empty(), "Destroying the mixer closes every opened sound");
 
-    const auto bare = std::filesystem::temp_directory_path() / "jj_audio_test_bare";
+    const auto bare = makeAudioFolder(0);
     std::filesystem::remove_all(bare);
     std::filesystem::create_directories(bare);
     FakeBackend quiet;
@@ -307,6 +399,140 @@ void missingFilesAreHarmless() {
     std::filesystem::remove_all(bare);
 }
 
+bool near(float actual, float expected) { return std::abs(actual - expected) < .00001f; }
+
+bool voicesHaveVolume(const FakeBackend& backend, const char* filename, float expected) {
+    int count = 0;
+    for (const auto& voice : backend.files_) {
+        if (voice.second.filename() != filename) continue;
+        ++count;
+        if (!near(backend.volume_.at(voice.first), expected)) return false;
+    }
+    return count == static_cast<int>(audio::Mixer::voicesPerSound);
+}
+
+void liveMasterVolumesAreIndependent() {
+    const auto root = makeAudioFolder(3);
+    FakeBackend backend;
+    audio::Levels levels;
+    levels.music = .4f;
+    levels.sfx = .8f;
+    levels.ui = .6f;
+    levels.car = .7f;
+    levels.duck = .25f;
+    audio::Mixer mixer(backend, root, 15, levels);
+    mixer.setMode(audio::MusicMode::Game);
+    mixer.play(audio::Sfx::CardDeal);
+    mixer.play(audio::Sfx::CardRoll);
+    mixer.play(audio::Sfx::UiError);
+    mixer.startCarPass(.24);
+    mixer.tick(.4);
+    const auto status = mixer.musicStatus();
+    const auto starts = backend.started.size();
+    const auto seeks = backend.seeks.size();
+    const auto opened = backend.openAttempts;
+    mixer.setVolumes(.5f, .25f);
+    check(near(backend.volume_["jjmusic"], .2f), "The music master multiplies the configured music level");
+    check(voicesHaveVolume(backend, "card_deal.mp3", .18f) && voicesHaveVolume(backend, "card_roll.mp3", .2f),
+          "The effects master updates already-open card voices and preserves the deal headroom trim");
+    check(voicesHaveVolume(backend, "ui_error.mp3", .15f) && voicesHaveVolume(backend, "ui_open.mp3", .15f),
+          "All UI voices share the effects master, including voices not yet played");
+    check(near(backend.volume_["jjcar"], .175f), "The car belongs to the effects master");
+    const auto after = mixer.musicStatus();
+    check(after.track == status.track && after.position == status.position && after.sampledAt == status.sampledAt,
+          "Volume changes preserve the soundtrack clock and track identity");
+    mixer.setVolumes(0.0f, .25f);
+    check(backend.volume_["jjmusic"] == 0 && near(backend.volume_["jjcar"], .175f),
+          "Music mute leaves effects and ambience unchanged");
+    mixer.setVolumes(.75f, 0.0f);
+    bool effectsSilent = true;
+    for (const auto& voice : backend.files_)
+        if (voice.first != "jjmusic") effectsSilent = effectsSilent && backend.volume_[voice.first] == 0;
+    check(effectsSilent && near(backend.volume_["jjmusic"], .3f),
+          "Effects mute silences every SFX, UI and car voice while music keeps its own volume");
+    check(backend.started.size() == starts && backend.seeks.size() == seeks && backend.openAttempts == opened &&
+          backend.playing("jjmusic") && backend.playing("jjcar"),
+          "Muting and live changes never restart, seek, reopen or stop an active recording");
+    mixer.setDucked(true);
+    check(near(backend.volume_["jjmusic"], .075f), "Ducking multiplies the selected master music level");
+    mixer.setVolumes(.5f, .5f);
+    check(near(backend.volume_["jjmusic"], .05f), "A slider change preserves active music ducking");
+    backend.finishMusic();
+    mixer.tick(2.0);
+    check(near(backend.volume_["jjmusic"], .05f) && backend.musicStarts() == 2,
+          "The next shuffled track starts with the current master volume and duck state");
+    mixer.setMode(audio::MusicMode::Menu);
+    check(near(backend.volume_["jjmusic"], .05f), "The menu theme uses the same current master volume");
+    std::filesystem::remove_all(root);
+}
+
+void changingEffectsVolumePreservesCarFade() {
+    const auto root = makeAudioFolder(1);
+    FakeBackend backend;
+    audio::Mixer mixer(backend, root, 2);
+    mixer.tick(10);
+    mixer.startCarPass(.24);
+    mixer.stopCarPass(2);
+    mixer.tick(10.5);
+    mixer.setVolumes(1, .4f);
+    check(near(backend.volume_["jjcar"], .27f), "Changing effects gain preserves the car fade's current three-quarter envelope");
+    mixer.tick(11.0);
+    check(near(backend.volume_["jjcar"], .18f), "The car fade continues under its new master gain");
+    mixer.setVolumes(1, 0);
+    mixer.tick(11.5);
+    check(backend.volume_["jjcar"] == 0 && mixer.carPassPlaying(), "The car fade continues silently while effects are muted");
+    mixer.setVolumes(1, .8f);
+    check(near(backend.volume_["jjcar"], .18f), "Unmuting a fading car restores only its remaining quarter envelope");
+    mixer.tick(12.01);
+    check(!mixer.carPassPlaying() && !backend.playing("jjcar") && backend.seeks.size() == 1,
+          "Volume changes cannot extend, restart or seek the original car fade");
+    std::filesystem::remove_all(root);
+}
+
+void volumeGuardsAndDeduplication() {
+    const auto root = makeAudioFolder(3);
+    FakeBackend backend;
+    audio::Mixer mixer(backend, root, 9);
+    mixer.setVolumes(.25f, .6f);
+    mixer.setMode(audio::MusicMode::Menu);
+    check(near(backend.volume_["jjmusic"], .125f) && voicesHaveVolume(backend, "ui_open.mp3", .48f),
+          "Volume preferences set before playback apply to the first music and effect voices");
+    const int writes = backend.volumeWrites;
+    for (int i = 0; i < 100; ++i) mixer.setVolumes(.25f, .6f);
+    mixer.setVolumes(std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity());
+    check(backend.volumeWrites == writes, "Identical and non-finite slider values do not generate repeated backend writes");
+    mixer.setVolumes(-1.0f, 2.0f);
+    check(backend.volume_["jjmusic"] == 0 && voicesHaveVolume(backend, "card_roll.mp3", 1.0f),
+          "Finite out-of-range master values clamp to mute or full volume");
+    mixer.setVolumes(std::numeric_limits<float>::infinity(), .25f);
+    check(backend.volume_["jjmusic"] == 0 && voicesHaveVolume(backend, "ui_open.mp3", .2f),
+          "An invalid music value preserves that channel without discarding a valid effects update");
+    mixer.setVolumes(.5f, std::numeric_limits<float>::quiet_NaN());
+    check(near(backend.volume_["jjmusic"], .25f) && voicesHaveVolume(backend, "ui_open.mp3", .2f),
+          "An invalid effects value preserves that channel without discarding a valid music update");
+
+    FakeBackend referenceBackend;
+    audio::Mixer reference(referenceBackend, root, 9);
+    reference.setMode(audio::MusicMode::Game);
+    mixer.setMode(audio::MusicMode::Game);
+    bool sameTracks = true;
+    for (int end = 1; end < 20; ++end) {
+        sameTracks = sameTracks && mixer.currentTrack() == reference.currentTrack();
+        mixer.setVolumes(end % 2 ? 0.0f : .6f, .3f);
+        backend.finishMusic();
+        referenceBackend.finishMusic();
+        mixer.tick(end * 2.0);
+        reference.tick(end * 2.0);
+    }
+    check(sameTracks && mixer.currentTrack() == reference.currentTrack(),
+          "Muting and changing volume across tracks never reset or consume the shuffle playlist");
+    audio::Engine disabled(root, false, .2f, 0.0f);
+    disabled.setVolumes(.8f, .4f);
+    disabled.setVolumes(std::numeric_limits<float>::quiet_NaN(), std::numeric_limits<float>::infinity());
+    check(!disabled.active() && disabled.musicClock().track == -1, "Disabled audio safely accepts startup and live volume preferences");
+    std::filesystem::remove_all(root);
+}
+
 } // namespace
 
 int main() {
@@ -317,7 +543,12 @@ int main() {
     soundEffectsAndDucking();
     carPassFollowsTheCar();
     musicStatusTracksTheSoundtrack();
+    brokenTracksCannotHideThePlayableOne();
+    carCompletionAndInvalidRequestsAreHarmless();
     missingFilesAreHarmless();
+    liveMasterVolumesAreIndependent();
+    changingEffectsVolumePreservesCarFade();
+    volumeGuardsAndDeduplication();
     std::cout << checks << " checks, " << failures << " failures\n";
     return failures == 0 ? 0 : 1;
 }

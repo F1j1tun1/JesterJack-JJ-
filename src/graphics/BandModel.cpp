@@ -163,6 +163,9 @@ struct Pose {
     float nod = 0, headYaw = 0, headTilt = 0;       // Head relative to the torso (nod > 0 looks down).
     std::array<vec3, 2> hand{};                     // Index 0 = the person's right hand, 1 = left.
     std::array<vec3, 2> palm{vec3(0, 1, 0), vec3(0, 1, 0)}; // Direction the back of the hand faces.
+    std::array<std::array<vec3, 3>, 2> fingertips{}; // Instrument-space contacts placed in band space.
+    std::array<vec3, 2> thumb{};
+    std::array<bool, 2> articulated{false, false};
     std::array<vec3, 2> foot{};
     vec3 elbowPole[2] = {vec3(-.6f, -1, -.3f), vec3(.6f, -1, -.3f)};
     bool seated = false;
@@ -174,7 +177,7 @@ struct Joints {
     std::array<vec3, 2> shoulder{}, elbow{}, wrist{};
 };
 
-constexpr float upperArm = .30f, foreArm = .27f, thigh = .45f, shin = .44f;
+constexpr float upperArm = .315f, foreArm = .285f, thigh = .45f, shin = .44f;
 
 // The torso orientation a pose will have, so instruments can be attached before the person is drawn.
 mat3 torsoOf(const Pose& pose) { return rotY(pose.yaw) * rotY(pose.twist) * rotX(pose.lean) * rotZ(pose.roll); }
@@ -191,28 +194,32 @@ Joints drawPerson(Builder& b, const Pose& pose, const Look& look) {
     j.headCenter = j.neck + j.head * vec3(0, .15f, .015f);
 
     // Jacket and shirt.
-    b.ball(p + body * vec3(0, -.03f, 0), {.19f, .13f, .125f}, suit, body);
-    b.ball(p + j.torso * vec3(0, .17f, 0), {.165f, .19f, .115f}, suit, j.torso);
-    b.ball(p + j.torso * vec3(0, .40f, 0), {.215f, .22f, .13f}, suit, j.torso);
+    b.ball(p + body * vec3(0, -.035f, 0), {.158f, .105f, .112f}, suit, body);
+    b.ball(p + j.torso * vec3(0, .17f, 0), {.153f, .21f, .105f}, suit, j.torso);
+    b.ball(p + j.torso * vec3(0, .40f, 0), {.198f, .205f, .119f}, suit, j.torso);
     b.cube(p + j.torso * vec3(0, .40f, .121f), {.075f, .30f, .014f}, shirt, j.torso);
     for (const float s : {-1.0f, 1.0f})
         b.cube(p + j.torso * vec3(s * .062f, .41f, .124f), {.045f, .28f, .014f}, suitEdge, j.torso * rotZ(s * -.16f));
     b.ball(j.neck - j.torso * vec3(0, .035f, 0), {.07f, .035f, .07f}, shirt, j.torso);
     b.cube(p + j.torso * vec3(0, .43f, .131f), {.028f, .12f, .008f}, suitEdge, j.torso); // Dark tie.
+    b.cube(p + j.torso * vec3(.115f, .415f, .114f), {.060f, .009f, .008f}, shirt, j.torso);
+    for (const float y : {.19f, .27f})
+        b.ball(p + j.torso * vec3(.016f, y, .111f), {.007f, .007f, .004f}, suitEdge, j.torso);
 
     // Neck, head, face and hair.
     const vec3 skinBase = look.skin;
     const Surface skin{skinBase, .12f, 24};
     const Surface hair{look.hair, .20f, 30};
     b.rod(p + j.torso * vec3(0, .53f, 0), j.headCenter - j.head * vec3(0, .09f, 0), .042f, skin);
-    b.ball(j.headCenter, {.092f, .118f, .10f}, skin, j.head);
+    b.ball(j.headCenter, {.082f, .119f, .089f}, skin, j.head);
+    b.ball(j.headCenter + j.head * vec3(0, -.059f, .014f), {.062f, .059f, .070f}, skin, j.head);
     for (const float s : {-1.0f, 1.0f}) {
-        b.ball(j.headCenter + j.head * vec3(s * .094f, -.005f, -.005f), {.014f, .03f, .02f}, skin, j.head);
-        b.ball(j.headCenter + j.head * vec3(s * .036f, .02f, .088f), {.012f, .008f, .008f}, shoe, j.head);
+        b.ball(j.headCenter + j.head * vec3(s * .082f, -.005f, -.005f), {.012f, .026f, .018f}, skin, j.head);
+        b.ball(j.headCenter + j.head * vec3(s * .032f, .02f, .079f), {.010f, .005f, .005f}, shoe, j.head);
     }
-    b.ball(j.headCenter + j.head * vec3(0, -.012f, .1f), {.016f, .02f, .02f}, skin, j.head);
-    b.cube(j.headCenter + j.head * vec3(0, -.052f, .092f), {.04f, .006f, .005f}, Surface{{.12f, .04f, .04f}}, j.head);
-    b.ball(j.headCenter + j.head * vec3(0, .035f, -.028f), {.098f, .092f, .098f}, hair, j.head);
+    b.ball(j.headCenter + j.head * vec3(0, -.012f, .088f), {.012f, .021f, .017f}, skin, j.head);
+    b.cube(j.headCenter + j.head * vec3(0, -.052f, .081f), {.034f, .004f, .004f}, Surface{{.12f, .04f, .04f}}, j.head);
+    b.ball(j.headCenter + j.head * vec3(0, .039f, -.028f), {.087f, .087f, .088f}, hair, j.head);
     if (look.hat) {
         const mat3 hatFrame = j.head * rotZ(look.hatTilt);
         const vec3 crown = j.headCenter + hatFrame * vec3(0, .075f, 0);
@@ -225,15 +232,38 @@ Joints drawPerson(Builder& b, const Pose& pose, const Look& look) {
     for (int i = 0; i < 2; ++i) {
         const float side = i == 0 ? -1.0f : 1.0f;
         j.shoulder[i] = p + j.torso * vec3(side * .205f, .50f, 0);
-        j.elbow[i] = solveLimb(j.shoulder[i], pose.hand[i], upperArm, foreArm, body * pose.elbowPole[i]);
-        const vec3 forearm = glm::normalize(pose.hand[i] - j.elbow[i]);
-        j.wrist[i] = j.elbow[i] + forearm * foreArm;
-        b.ball(j.shoulder[i], vec3(.07f), suit);
-        b.rod(j.shoulder[i], j.elbow[i], .053f, suit);
-        b.ball(j.elbow[i], vec3(.051f), suit);
-        b.rod(j.elbow[i], j.wrist[i] - forearm * .03f, .044f, suit);
-        b.rod(j.wrist[i] - forearm * .035f, j.wrist[i] + forearm * .005f, .047f, shirt);
-        b.ball(j.wrist[i] + forearm * .05f, {.036f, .021f, .07f}, skin, basisZ(forearm, pose.palm[i]));
+        const vec3 fingers = pose.articulated[i]
+            ? (pose.fingertips[i][0] + pose.fingertips[i][1] + pose.fingertips[i][2]) / 3.0f
+            : pose.hand[i] + j.torso * vec3(0, -.02f, .07f);
+        const vec3 forward = glm::normalize(fingers - pose.hand[i]);
+        const mat3 handFrame = basisZ(forward, pose.palm[i]);
+        // `hand` is the palm centre. The wrist is behind it, not beyond the fingertip target.
+        j.wrist[i] = pose.hand[i] - forward * .044f;
+        j.elbow[i] = solveLimb(j.shoulder[i], j.wrist[i], upperArm, foreArm, body * pose.elbowPole[i]);
+        const vec3 forearm = glm::normalize(j.wrist[i] - j.elbow[i]);
+        b.ball(j.shoulder[i], {.055f, .064f, .055f}, suit, j.torso);
+        b.rod(j.shoulder[i], j.elbow[i], .043f, suit);
+        b.ball(j.elbow[i], vec3(.042f), suit);
+        b.rod(j.elbow[i], j.wrist[i] - forearm * .025f, .034f, suit);
+        b.rod(j.wrist[i] - forearm * .026f, j.wrist[i] + forearm * .008f, .036f, shirt);
+        b.rod(j.wrist[i], pose.hand[i], .020f, skin);
+        b.ball(pose.hand[i], {.030f, .017f, .040f}, skin, handFrame);
+        for (int finger = 0; finger < 3; ++finger) {
+            const float spread = static_cast<float>(finger - 1) * .016f;
+            const vec3 base = pose.hand[i] + handFrame * vec3(spread, 0, .024f);
+            const vec3 tip = pose.articulated[i] ? pose.fingertips[i][finger]
+                : pose.hand[i] + handFrame * vec3(spread, -.012f, .076f);
+            const vec3 knuckle = glm::mix(base, tip, .48f) + handFrame[1] * .015f;
+            b.rod(base, knuckle, .0065f, skin);
+            b.rod(knuckle, tip, .0055f, skin);
+            b.ball(tip, vec3(.006f), skin);
+        }
+        const vec3 thumbBase = pose.hand[i] + handFrame * vec3(-side * .025f, -.005f, 0);
+        const vec3 thumbTip = pose.articulated[i] ? pose.thumb[i]
+            : pose.hand[i] + handFrame * vec3(-side * .047f, -.018f, .034f);
+        const vec3 thumbJoint = glm::mix(thumbBase, thumbTip, .5f) - handFrame[1] * .008f;
+        b.rod(thumbBase, thumbJoint, .009f, skin);
+        b.rod(thumbJoint, thumbTip, .007f, skin);
     }
 
     // Legs and shoes.
@@ -337,7 +367,8 @@ void pianist(Builder& b, const Beat& t) {
     const float glide = smooth(sinceNote / .22f);
     const float rightX = mixf(keyX(previous), keyX(note), glide);
     const float rightDip = hitDecay(sinceNote, 7.0f) * (strikes || sinceNote < .5f ? 1.0f : .6f);
-    const float held = sinceNote < .30f ? 1.0f : std::exp(-(sinceNote - .30f) * 12.0f);
+    const float held = smooth(sinceNote / .04f)
+        * (sinceNote < .30f ? 1.0f : std::exp(-(sinceNote - .30f) * 12.0f));
     press[static_cast<std::size_t>(note)] = std::max(press[static_cast<std::size_t>(note)], held * act);
 
     // Left hand: a three-note chord on beats 1, the "and" of 2 and 3, changing every two bars.
@@ -352,7 +383,8 @@ void pianist(Builder& b, const Beat& t) {
     const float sinceChord = t.inBar - chordBeats[chord - 1];
     const float leftX = mixf(keyX(rootBefore + 2), keyX(root + 2), smooth(t.inBar / .6f));
     const float leftDip = hitDecay(sinceChord, 6.0f);
-    const float leftHeld = sinceChord < .35f ? 1.0f : std::exp(-(sinceChord - .35f) * 8.0f);
+    const float leftHeld = smooth(sinceChord / .04f)
+        * (sinceChord < .35f ? 1.0f : std::exp(-(sinceChord - .35f) * 8.0f));
     for (int n : {root, root + 2, root + 4})
         press[static_cast<std::size_t>(std::clamp(n, 0, whites - 1))] =
             std::max(press[static_cast<std::size_t>(std::clamp(n, 0, whites - 1))], leftHeld * act);
@@ -370,7 +402,9 @@ void pianist(Builder& b, const Beat& t) {
 
     // Case: a rectangle for the front, a wide ellipse for the curved tail.
     b.cube(F.at({0, .80f, .60f}), {1.44f, .36f, .88f}, blackGloss, F.rotation);
-    b.drum(F.at({0, .80f, 1.0f}), .72f, .36f, 1.26f, blackGloss, F.rotation);
+    // Keep the rounded tail behind the fallboard; an ellipse centred too far forward swallowed
+    // the middle of the keyboard and hid the pianist's actual fingertip contacts.
+    b.drum(F.at({0, .80f, 1.25f}), .72f, .36f, 1.00f, blackGloss, F.rotation);
     b.cube(F.at({0, .835f, .17f}), {1.30f, .13f, .03f}, blackGloss, F.rotation); // Fallboard.
     b.cube(F.at({0, 1.06f, .31f}), {.62f, .30f, .012f}, blackGloss, F.rotation * rotX(-.30f)); // Music desk.
     // Lid propped open on the treble side, facing the audience.
@@ -398,15 +432,27 @@ void pianist(Builder& b, const Beat& t) {
     pose.pelvis = F.at({0, .56f, -.44f});
     pose.yaw = pi / 2;
     pose.lean = .15f + .05f * std::sin(pi * t.inBar * .5f) * act + .03f * rightDip * act;
-    pose.roll = .035f * std::sin(pi * t.bar * .5f + .7f) * act;
+    pose.roll = .035f * std::sin(pi * static_cast<float>(t.now) * .125f + .7f) * act;
     pose.twist = (rightX - leftX) * .10f;
     pose.nod = .12f + .06f * std::sin(2.0f * pi * static_cast<float>(t.now)) * act;
-    pose.headYaw = (t.playing ? .38f : .12f) * std::sin(t.time * .45f);
-    pose.headTilt = .05f * std::sin(t.time * .3f);
-    const float hover = .83f - .035f * act;
-    pose.hand[0] = F.at({rightX, hover - .05f * rightDip * act, .05f});
-    pose.hand[1] = F.at({leftX, hover - .05f * leftDip * act, .05f});
+    pose.headYaw = (t.playing ? .12f : .06f) * std::sin(t.time * .45f);
+    pose.headTilt = .025f * std::sin(t.time * .3f);
+    const float hover = .80f - .018f * act;
+    pose.hand[0] = F.at({rightX, hover - .018f * rightDip * act, -.014f});
+    pose.hand[1] = F.at({leftX, hover - .018f * leftDip * act, -.014f});
     pose.palm = {F.dir({0, 1, 0}), F.dir({0, 1, 0})};
+    pose.articulated = {true, true};
+    // The melody's middle fingertip follows the same glissando as the wrist; the other fingers
+    // hover. Chord fingers spread by whole white-key widths, not independent floating dots.
+    for (int finger = 0; finger < 3; ++finger) {
+        const float spread = static_cast<float>(finger - 1);
+        pose.fingertips[0][finger] = F.at({rightX + spread * keyWidth,
+            .725f - press[static_cast<std::size_t>(note)] * .012f + std::abs(spread) * .018f, .043f});
+        pose.fingertips[1][finger] = F.at({leftX + spread * 2.0f * keyWidth,
+            .725f - leftHeld * act * .012f, .043f});
+    }
+    pose.thumb[0] = F.at({rightX + .048f, .750f, .012f});
+    pose.thumb[1] = F.at({leftX - .048f, .750f, .012f});
     pose.foot[0] = F.at({-.10f, pump * .03f, .20f});
     pose.foot[1] = F.at({.14f, 0, .06f});
     drawPerson(b, pose, looks[0]);
@@ -425,11 +471,11 @@ void guitarist(Builder& b, const Beat& t) {
     pose.pelvis = F.at({0, .93f - .025f * hitDecay(beatPhase, 5.0f) * act, 0});
     pose.yaw = .14f;
     pose.lean = .05f + .03f * std::sin(pi * t.inBar * .5f) * act;
-    pose.roll = .06f * std::sin(pi * static_cast<float>(t.now) * .25f) * act;
-    pose.twist = .05f * std::sin(pi * t.bar * .5f) * act;
+    pose.roll = .035f * std::sin(pi * static_cast<float>(t.now) * .25f) * act;
+    pose.twist = .05f * std::sin(pi * static_cast<float>(t.now) * .125f) * act;
     pose.nod = .10f + .05f * std::sin(2.0f * pi * static_cast<float>(t.now)) * act;
-    pose.headYaw = (t.playing ? .30f : .08f) * std::sin(t.time * .35f + 1.0f);
-    pose.headTilt = .04f * std::sin(t.time * .5f);
+    pose.headYaw = (t.playing ? .12f : .06f) * std::sin(t.time * .35f + 1.0f);
+    pose.headTilt = .025f * std::sin(t.time * .5f);
     const mat3 T = torsoOf(pose);
 
     // The guitar hangs at the hip on a strap, neck pointing up and out to the player's left.
@@ -466,14 +512,22 @@ void guitarist(Builder& b, const Beat& t) {
     const float s = mixf(position(bar - ((bar & 1) ? 0 : 1)), position(bar), slide)
         + .012f * std::sin(t.time * 6.0f) * act;
     const float press = .5f + .5f * std::cos(2.0f * pi * strumPhase);
-    pose.hand[1] = g({s + .02f, -.012f, -.012f});
+    pose.hand[1] = g({s + .02f, -.040f, -.014f});
     pose.palm[1] = G.dir({0, 0, -1});
     const float strum = std::cos(2.0f * pi * strumPhase) * (.025f + .055f * act);
-    pose.hand[0] = g({-.095f, strum, .075f});
+    pose.hand[0] = g({-.060f, strum, .085f});
     pose.palm[0] = G.dir({0, 0, 1});
     pose.elbowPole[1] = vec3(.5f, -1, -.2f);
-    for (int i = 0; i < 3; ++i) // Fingertips on the strings.
-        b.ball(g({s + .035f - i * .028f, (i - 1) * .011f, .034f - press * .001f}), vec3(.0075f), Surface{looks[1].skin, .1f, 20});
+    pose.articulated = {true, true};
+    for (int finger = 0; finger < 3; ++finger) {
+        pose.fingertips[1][finger] = g({s + .035f - finger * .028f,
+            (finger - 1) * .0085f, .034f - press * .001f});
+        pose.fingertips[0][finger] = g({-.091f + finger * .014f,
+            strum * .60f + (finger - 1) * .010f, .042f});
+    }
+    pose.thumb[1] = g({s + .006f, .026f, -.016f}); // Opposes the fingertips behind the neck.
+    pose.thumb[0] = g({-.109f, strum * .60f, .044f});
+    b.ball(g({-.107f, strum * .60f, .038f}), {.006f, .010f, .002f}, cream, G.rotation); // Pick.
     pose.foot[0] = F.at({-.15f, 0, .06f});
     pose.foot[1] = F.at({.22f, .035f * hitDecay(beatPhase, 6.0f) * (act > .35f ? 1.0f : 0.0f), -.05f});
     drawPerson(b, pose, looks[1]);
@@ -493,14 +547,14 @@ void guitarist(Builder& b, const Beat& t) {
 
 void drummer(Builder& b, const Beat& t) {
     const vec3 O(0.42f, 0, -2.95f); // Stool position; the drummer faces the audience (+Z).
-    const auto at = [&](vec3 v) { return O + v; };
+    const auto at = [&](vec3 v) { return O + vec3(v.x * .90f, v.y, v.z * .76f); };
     const float act = t.act;
     const float beatPhase = frac(t.now);
     const long bar = static_cast<long>(t.bar);
 
     // Surfaces to hit, in kit coordinates.
     const vec3 ride(-.55f, 1.16f, .92f), snare(.0f, .815f, .62f), tom1(-.15f, 1.05f, .93f), tom2(.17f, 1.055f, .93f);
-    const vec3 floorTom(-.66f, .645f, .52f), hatTop(.55f, 1.0f, .48f), crash(.62f, 1.31f, .84f);
+    const vec3 floorTom(-.56f, .645f, .52f), hatTop(.55f, 1.0f, .48f), crash(.62f, 1.31f, .84f);
     const float swing = 1.0f + 2.0f / 3.0f;
 
     const bool fill = (bar & 3) == 3 && hash(static_cast<std::uint32_t>(bar), 21) < .45f + .5f * act;
@@ -512,12 +566,14 @@ void drummer(Builder& b, const Beat& t) {
         right = {{0, ride}, {1, ride}, {swing, ride}, {2, ride}, {3, ride}, {3.0f + 2.0f / 3.0f, ride}};
         left = {{0, snare}, {1, hatTop}, {swing, snare}, {3, hatTop}, {3.0f + 2.0f / 3.0f, snare}};
         if (hash(static_cast<std::uint32_t>(bar), 22) < .55f) left.insert(left.begin() + 3, Stroke{2.0f + 2.0f / 3.0f, snare});
-        if (act > .7f && hash(static_cast<std::uint32_t>(bar), 23) < .4f) right.back() = {3.0f + 2.0f / 3.0f, crash};
+        // The left-side crash belongs to the left hand; reaching across with the ride hand would
+        // pull its wrist beyond a human arm's reach on loud accents.
+        if (act > .7f && hash(static_cast<std::uint32_t>(bar), 23) < .4f) left.back() = {3.0f + 2.0f / 3.0f, crash};
     }
     const float reach = t.playing ? 1.0f : .0f;
     const Path r = followStrokes(right, t.inBar, 4.0f, .09f + .13f * act);
     const Path l = followStrokes(left, t.inBar, 4.0f, .08f + .12f * act);
-    const vec3 stickDir = glm::normalize(vec3(0, .26f, -.965f));
+    const vec3 stickDir = glm::normalize(vec3(0, -.16f, 1.0f)); // Grip behind the tip, toward the player.
     const vec3 restRight = ride + vec3(0, .12f, 0), restLeft = snare + vec3(0, .12f, 0);
     const vec3 tipRight = glm::mix(restRight, r.position, reach), tipLeft = glm::mix(restLeft, l.position, reach);
 
@@ -525,7 +581,7 @@ void drummer(Builder& b, const Beat& t) {
     const float kickDown = (t.playing ? hitDecay(beatPhase, 9.0f) : 0.0f) * (.4f + .6f * act);
     const long beatIndex = static_cast<long>(std::floor(t.now));
     const float hatDown = (t.playing && (beatIndex & 1)) ? hitDecay(beatPhase, 7.0f) : 0.0f;
-    const float hatGap = .045f - .035f * std::max(hatDown, (beatIndex & 1) ? 1.0f - beatPhase : 0.0f);
+    const float hatGap = .045f - .035f * hatDown;
 
     Pose pose;
     pose.seated = true;
@@ -534,22 +590,32 @@ void drummer(Builder& b, const Beat& t) {
     pose.twist = glm::clamp((tipRight.x + tipLeft.x - snare.x * 2) * -.05f, -.12f, .12f);
     pose.roll = .035f * std::sin(pi * t.inBar * .5f) * act;
     pose.nod = .07f + .05f * std::sin(2.0f * pi * static_cast<float>(t.now)) * act;
-    pose.headYaw = .22f * std::sin(t.time * .4f) * (t.playing ? 1.0f : .4f);
-    pose.headTilt = .04f * std::sin(t.time * .8f);
-    pose.hand[0] = at(tipRight - stickDir * .28f);
-    pose.hand[1] = at(tipLeft - stickDir * .28f);
+    pose.headYaw = .10f * std::sin(t.time * .4f) * (t.playing ? 1.0f : .4f);
+    pose.headTilt = .025f * std::sin(t.time * .8f);
+    const std::array<vec3, 2> grip{at(tipRight) - stickDir * .28f, at(tipLeft) - stickDir * .28f};
+    pose.hand[0] = grip[0] + vec3(0, .018f, -.008f);
+    pose.hand[1] = grip[1] + vec3(0, .018f, -.008f);
     pose.palm = {vec3(0, 1, 0), vec3(0, 1, 0)};
+    pose.articulated = {true, true};
+    for (int hand = 0; hand < 2; ++hand) {
+        for (int finger = 0; finger < 3; ++finger)
+            pose.fingertips[hand][finger] = grip[hand] + stickDir * ((finger - 1) * .016f)
+                + vec3(hand == 0 ? .006f : -.006f, -.005f, 0);
+        pose.thumb[hand] = grip[hand] + vec3(hand == 0 ? -.007f : .007f, .006f, -.012f);
+    }
     pose.foot[0] = at({-.10f, .045f - .035f * kickDown, .50f});
     pose.foot[1] = at({.55f, .045f - .035f * hatDown, .28f});
     pose.elbowPole[0] = vec3(-.9f, -.6f, -.4f);
     pose.elbowPole[1] = vec3(.9f, -.6f, -.4f);
     drawPerson(b, pose, looks[2]);
-    b.rod(at(tipRight), at(tipRight - stickDir * .38f), .0075f, ivory);
-    b.rod(at(tipLeft), at(tipLeft - stickDir * .38f), .0075f, ivory);
+    b.rod(at(tipRight), at(tipRight) - stickDir * .38f, .0065f, ivory);
+    b.rod(at(tipLeft), at(tipLeft) - stickDir * .38f, .0065f, ivory);
+    b.ball(at(tipRight), {.008f, .008f, .011f}, ivory);
+    b.ball(at(tipLeft), {.008f, .008f, .011f}, ivory);
 
     // Bass drum with its pedal; the beater swings into the head.
     const vec3 axisZ(0, 0, 1);
-    b.disc(at({0, .30f, .95f}), axisZ, .28f, .42f, drumShell);
+    b.disc(at({0, .30f, .95f}), axisZ, .28f, .32f, drumShell);
     b.disc(at({0, .30f, .745f}), axisZ, .275f, .012f, drumHead);
     b.disc(at({0, .30f, 1.165f}), axisZ, .275f, .012f, drumHead);
     b.disc(at({0, .30f, 1.172f}), axisZ, .10f, .012f, drumShell);
@@ -575,12 +641,12 @@ void drummer(Builder& b, const Beat& t) {
     b.drum(at({.17f, 1.057f, .93f}), .145f, .008f, .145f, drumHead);
     b.rod(at({-.15f, .58f, .93f}), at({-.15f, .90f, .93f}), .01f, stand);
     b.rod(at({.17f, .58f, .93f}), at({.17f, .90f, .93f}), .01f, stand);
-    b.drum(at({-.66f, .45f, .52f}), .20f, .38f, .20f, drumShell);
-    b.drum(at({-.66f, .644f, .52f}), .195f, .008f, .195f, drumHead);
+    b.drum(at({-.56f, .45f, .52f}), .20f, .38f, .20f, drumShell);
+    b.drum(at({-.56f, .644f, .52f}), .195f, .008f, .195f, drumHead);
     for (int i = 0; i < 3; ++i) {
         const float a = static_cast<float>(i) * 2.0944f + .5f;
-        b.rod(at(vec3(-.66f + .17f * std::cos(a), .36f, .52f + .17f * std::sin(a))),
-              at(vec3(-.66f + .19f * std::cos(a), 0, .52f + .19f * std::sin(a))), .009f, stand);
+        b.rod(at(vec3(-.56f + .17f * std::cos(a), .36f, .52f + .17f * std::sin(a))),
+              at(vec3(-.56f + .19f * std::cos(a), 0, .52f + .19f * std::sin(a))), .009f, stand);
     }
     // Ride and crash cymbals tremble after a hit.
     const float rideWobble = hitDecay(r.since, 6.0f) * act * .05f;
@@ -622,15 +688,15 @@ void trumpeter(Builder& b, const Beat& t) {
     pose.yaw = -.30f;
     const float phrase = .5f + .5f * std::sin(pi * static_cast<float>(t.now) * .125f);
     pose.lean = -.04f - .05f * phrase * up;                      // Leans back into the high notes.
-    pose.roll = .07f * std::sin(pi * static_cast<float>(t.now) * .25f) * act;
-    pose.twist = .06f * std::sin(pi * t.bar * .5f + 1.0f) * act;
+    pose.roll = .035f * std::sin(pi * static_cast<float>(t.now) * .25f) * act;
+    pose.twist = .06f * std::sin(pi * static_cast<float>(t.now) * .125f + 1.0f) * act;
     pose.nod = -.10f * up + .05f * std::sin(2.0f * pi * static_cast<float>(t.now)) * act;
-    pose.headYaw = .12f * std::sin(t.time * .3f);
-    pose.headTilt = .03f * std::sin(t.time * .6f);
+    pose.headYaw = .055f * std::sin(t.time * .3f);
+    pose.headTilt = .020f * std::sin(t.time * .6f);
     const mat3 T = torsoOf(pose), H = headOf(pose);
     const vec3 neck = pose.pelvis + T * vec3(0, .58f, .01f);
     const vec3 head = neck + H * vec3(0, .15f, .015f);
-    const vec3 mouth = head + H * vec3(0, -.05f, .10f);
+    const vec3 mouth = head + H * vec3(0, -.05f, .085f);
 
     // The horn: its mouthpiece at the lips, bell lifting with the phrase, dropping when resting.
     const float lift = mixf(.75f, -.04f - .14f * phrase, up) + .035f * hitDecay(beatPhase, 6.0f) * act;
@@ -651,18 +717,27 @@ void trumpeter(Builder& b, const Beat& t) {
         const float f = static_cast<float>(j) / 7.0f;
         b.disc(p({0, -.03f, .45f + .022f * static_cast<float>(j)}), P.dir({0, 0, 1}), .011f + .064f * std::pow(f, 2.2f), .024f, brass);
     }
+    b.disc(p({0, -.03f, .617f}), P.dir({0, 0, 1}), .064f, .002f, blackGloss);
     b.tube({p({0, -.03f, .19f}), p({0, -.03f, .075f}), p({0, -.065f, .04f}), p({0, -.10f, .075f}), p({0, -.10f, .38f}), p({0, -.07f, .445f})},
            {.0085f, .0085f, .0085f, .0085f, .0085f, .0085f}, brass);
     b.tube({p({0, -.06f, .222f}), p({0, -.125f, .222f}), p({0, -.125f, .30f}), p({0, -.06f, .30f})}, {.0075f, .0075f, .0075f, .0075f}, brassDark);
     b.ball(p({0, -.108f, .40f}), {.01f, .014f, .01f}, brassDark);
-    if (blowing) {
-        for (const float s : {-1.0f, 1.0f}) // Puffed cheeks.
-            b.ball(head + H * vec3(s * .075f, -.045f, .075f), {.032f, .035f, .03f}, Surface{looks[3].skin, .12f, 24}, H);
-    }
-    pose.hand[0] = p({.004f, .042f - valve[0] * .002f, .222f});
+    const float air = mixf(rests(k - 1) ? 0.0f : 1.0f, blowing ? 1.0f : 0.0f, blend) * up;
+    for (const float side : {-1.0f, 1.0f})
+        b.ball(head + H * vec3(side * .063f, -.045f, .060f),
+            {.020f + .005f * air, .025f, .020f}, Surface{looks[3].skin, .12f, 24}, H);
+    pose.hand[0] = p({-.040f, .064f, .176f});
     pose.palm[0] = P.dir({0, 1, 0});
-    pose.hand[1] = p({-.012f, -.12f, .27f});
-    pose.palm[1] = P.dir({0, 1, 0});
+    pose.hand[1] = p({.036f, -.105f, .218f});
+    pose.palm[1] = P.dir({0, -1, 0});
+    pose.articulated = {true, true};
+    for (int finger = 0; finger < 3; ++finger) {
+        const float z = .19f + .028f * finger;
+        pose.fingertips[0][finger] = p({0, .029f - valve[static_cast<std::size_t>(finger)] * .012f, z});
+        pose.fingertips[1][finger] = p({-.010f, -.060f, z});
+    }
+    pose.thumb[0] = p({.010f, -.030f, .178f});
+    pose.thumb[1] = p({-.004f, -.110f, .270f});
     pose.elbowPole[0] = vec3(-.8f, -1, -.2f);
     pose.elbowPole[1] = vec3(.8f, -1, -.2f);
     pose.foot[0] = F.at({-.15f, 0, .05f});
@@ -688,18 +763,18 @@ void saxophonist(Builder& b, const Beat& t) {
     pose.pelvis = F.at({0, .93f - .03f * hitDecay(beatPhase, 4.0f) * act, 0});
     pose.yaw = -.22f;
     pose.lean = .02f + .06f * std::sin(pi * t.inBar * .5f) * act;
-    pose.roll = .13f * sway * up;                                 // Rocks with the phrase.
-    pose.twist = .08f * std::sin(pi * t.bar * .5f) * act;
+    pose.roll = .055f * sway * up;                                // Breathes with the phrase.
+    pose.twist = .08f * std::sin(pi * static_cast<float>(t.now) * .125f) * act;
     pose.nod = -.04f + .05f * std::sin(2.0f * pi * static_cast<float>(t.now)) * act;
-    pose.headYaw = .10f * std::sin(t.time * .33f + 2.0f);
-    pose.headTilt = -.06f * sway * up;
+    pose.headYaw = .045f * std::sin(t.time * .33f + 2.0f);
+    pose.headTilt = -.025f * sway * up;
     const mat3 T = torsoOf(pose), H = headOf(pose);
     const vec3 neck = pose.pelvis + T * vec3(0, .58f, .01f);
     const vec3 head = neck + H * vec3(0, .15f, .015f);
-    const vec3 mouth = head + H * vec3(0, -.05f, .095f);
+    const vec3 mouth = head + H * vec3(0, -.05f, .085f);
 
     // The horn hangs from the neck strap: it swings out and the bell lifts on long phrases.
-    const float swing = .20f * std::sin(pi * static_cast<float>(t.now) * .25f + .6f) * up;
+    const float swing = .11f * std::sin(pi * static_cast<float>(t.now) * .25f + .6f) * up;
     const float bellLift = (.06f + .16f * (.5f + .5f * std::sin(pi * static_cast<float>(t.now) * .125f))) * up;
     const Frame S{mouth, T * rotZ(swing * .5f) * rotX(-bellLift)};
     const auto s = [&](vec3 v) { return S.at(v); };
@@ -720,9 +795,14 @@ void saxophonist(Builder& b, const Beat& t) {
         const float f = static_cast<float>(j) / 5.0f;
         b.disc(s({0, -.48f, .425f}) + bellDirection * (.025f * static_cast<float>(j)), bellDirection, .054f + .055f * std::pow(f, 1.6f), .027f, brass);
     }
+    b.disc(s({0, -.48f, .425f}) + bellDirection * .140f, bellDirection, .092f, .002f, blackGloss);
+    std::array<float, 9> keyDown{};
     for (int i = 0; i < 9; ++i) { // Pearl keys down the front, brass keywork either side.
         const float y = -.20f - .052f * static_cast<float>(i);
-        const float down = 0.0f + (fingers(k, 41 + static_cast<std::uint32_t>(i)) > .5f ? blend : 1.0f - blend) * .5f * act;
+        const auto salt = 41 + static_cast<std::uint32_t>(i);
+        const float down = mixf(fingers(k - 1, salt) > .5f ? 1.0f : 0.0f,
+            fingers(k, salt) > .5f ? 1.0f : 0.0f, blend) * .5f * act;
+        keyDown[static_cast<std::size_t>(i)] = down;
         b.ball(s({0, y, .164f - down * .008f}), {.011f, .011f, .007f}, ivory);
         b.ball(s({(i % 2 ? .034f : -.034f), y - .01f, .195f}), {.013f, .009f, .009f}, chrome);
     }
@@ -732,18 +812,29 @@ void saxophonist(Builder& b, const Beat& t) {
     b.rod(neck + T * vec3(-.05f, .02f, -.04f), s({0, -.30f, .20f}), .006f, shoe);
 
     // Hands on the keys; the fingers shift a little on every note.
-    const float wobbleL = (fingers(k, 51) - .5f) * .03f * act, wobbleR = (fingers(k, 52) - .5f) * .03f * act;
-    pose.hand[1] = s({.012f, -.29f + wobbleL, .150f});
-    pose.hand[0] = s({-.012f, -.50f + wobbleR, .150f});
+    const float wobbleL = (mixf(fingers(k - 1, 51), fingers(k, 51), blend) - .5f) * .010f * act;
+    const float wobbleR = (mixf(fingers(k - 1, 52), fingers(k, 52), blend) - .5f) * .010f * act;
+    pose.hand[1] = s({.060f, -.255f + wobbleL, .137f});
+    pose.hand[0] = s({-.060f, -.465f + wobbleR, .137f});
     pose.palm = {S.dir({0, 0, -1}), S.dir({0, 0, -1})};
+    pose.articulated = {true, true};
+    for (int finger = 0; finger < 3; ++finger) {
+        const int upperKey = finger, lowerKey = finger + 4;
+        pose.fingertips[1][finger] = s({0, -.20f - .052f * upperKey,
+            .158f - keyDown[static_cast<std::size_t>(upperKey)] * .008f});
+        pose.fingertips[0][finger] = s({0, -.20f - .052f * lowerKey,
+            .158f - keyDown[static_cast<std::size_t>(lowerKey)] * .008f});
+    }
+    pose.thumb[1] = s({.017f, -.274f, .214f});
+    pose.thumb[0] = s({-.020f, -.471f, .224f});
     pose.elbowPole[0] = vec3(-.9f, -.8f, -.2f);
     pose.elbowPole[1] = vec3(.9f, -.8f, -.2f);
     pose.foot[0] = F.at({-.15f, .035f * hitDecay(beatPhase, 6.0f) * (act > .35f ? 1.0f : 0.0f), .05f});
     pose.foot[1] = F.at({.19f, 0, -.04f});
     drawPerson(b, pose, looks[4]);
-    if (up > .5f)
-        for (const float side : {-1.0f, 1.0f})
-            b.ball(head + H * vec3(side * .07f, -.045f, .07f), {.028f, .03f, .026f}, Surface{looks[4].skin, .12f, 24}, H);
+    for (const float side : {-1.0f, 1.0f})
+        b.ball(head + H * vec3(side * .061f, -.045f, .059f), {.021f, .025f, .020f},
+            Surface{looks[4].skin, .12f, 24}, H);
 }
 
 void ensemble(Builder& b, const Playback& p) {

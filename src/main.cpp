@@ -2,6 +2,7 @@
 #include "presentation/CollectionOrder.hpp"
 #include "presentation/EntranceTransition.hpp"
 #include "presentation/PalaceStyle.hpp"
+#include "presentation/CarPass.hpp"
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -24,6 +25,7 @@
 #include <stb_image_write.h>
 
 #include "audio/Engine.hpp"
+#include "audio/Preferences.hpp"
 #include "game/Game.hpp"
 #include "graphics/Renderer.hpp"
 #include "graphics/ArtTexture.hpp"
@@ -38,6 +40,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <limits>
@@ -60,7 +63,21 @@ constexpr ImGuiWindowFlags panelFlags = ImGuiWindowFlags_NoDecoration |
 // Sound output used by free UI helpers. main() points it at the live engine for the
 // interactive loop only, so previews, screenshots and tests stay silent.
 audio::Engine* soundOut = nullptr;
+audio::Sfx pendingUiSound = audio::Sfx::Count;
+int uiSoundPriority(audio::Sfx sound) {
+    switch (sound) {
+        case audio::Sfx::UiError: return 4;
+        case audio::Sfx::UiClose: return 3;
+        case audio::Sfx::UiOpen: return 2;
+        case audio::Sfx::UiSelection: return 1;
+        default: return 0;
+    }
+}
 void playSound(audio::Sfx sound) {
+    if (uiSoundPriority(sound)>0) {
+        if (uiSoundPriority(sound)>uiSoundPriority(pendingUiSound)) pendingUiSound=sound;
+        return;
+    }
     if (soundOut) soundOut->play(sound);
 }
 struct SoundScope {
@@ -79,24 +96,26 @@ void playCue(presentation::Cue cue) {
         case Cue::HandWon: playSound(Sfx::TadaMinor); break;
         case Cue::RoundCleared: playSound(Sfx::TadaMajor); break;
         case Cue::ChipsWon: playSound(Sfx::ChipsWin); break;
-        case Cue::HandLost: playSound(Sfx::ChipsWin); break; // The dealer sweeps the stake.
-        case Cue::RunLost: playSound(Sfx::YouLose); break;
+        case Cue::HandLost:
+        case Cue::RunLost:
+            playSound(Sfx::ChipsWin); // The dealer collects the chips at settlement.
+            playSound(Sfx::YouLose);
+            break;
     }
 }
 
-// Hover sound: once when the pointer enters a button, in the main menu screens only (never during a
-// run). Two ids track consecutive frames, so a button that vanishes and returns under a resting
-// pointer sounds again.
+// One selection sound on entering a control. A click or error in the same frame takes priority.
 bool hoverSoundsEnabled = false;
 ImGuiID hoveredButtonBefore = 0, hoveredButtonNow = 0;
 void beginSoundFrame() {
+    pendingUiSound=audio::Sfx::Count;
     hoveredButtonBefore = hoveredButtonNow;
     hoveredButtonNow = 0;
 }
 void buttonSounds(bool pressed, bool closing) {
     if (ImGui::IsItemHovered()) {
         const ImGuiID id = ImGui::GetItemID();
-        if (hoverSoundsEnabled && hoveredButtonBefore != id) playSound(audio::Sfx::UiSelection);
+        if (!pressed && hoverSoundsEnabled && hoveredButtonBefore != id) playSound(audio::Sfx::UiSelection);
         hoveredButtonNow = id;
     }
     if (pressed) playSound(closing ? audio::Sfx::UiClose : audio::Sfx::UiOpen);
@@ -140,6 +159,8 @@ struct Options {
     bool cameraOverride = false;
     float light = 1.2f;
     bool lightSmoke = false;
+    bool audioSmoke = false;
+    std::filesystem::path audioSettings;
     bool entrancePreview = false;
     bool equipmentSmoke = false;
     bool abilitySmoke = false;
@@ -226,6 +247,8 @@ Options parseOptions(int argc, char** argv) {
             options.stopOwned=std::stoi(value());
             if(options.stopOwned<0||options.stopOwned>bj::maxEquipmentSlots) throw std::runtime_error("--stop-owned must be 0..8");
         } else if(arg=="--light-smoke") options.lightSmoke=true;
+        else if(arg=="--audio-smoke") options.audioSmoke=true;
+        else if(arg=="--audio-settings") options.audioSettings=value();
         else if (arg == "--screenshot") options.screenshot = value();
         else if (arg == "--capture-states") options.captures = value();
         else if (arg == "--assets") options.assets = value();
@@ -250,6 +273,8 @@ Options parseOptions(int argc, char** argv) {
                 "  --camera Y,P,D    Diagnostic orbit: yaw,pitch,distance\n"
                 "  --light VALUE     Lamp intensity (.55..2.5)\n"
                 "  --light-smoke     Exercise live light slider at three values\n"
+                "  --audio-smoke     Exercise the two volume sliders\n"
+                "  --audio-settings FILE Use a separate audio preferences file\n"
                 "  --replay FILE     Replay verified public game commands for diagnostics\n"
                 "  --stop-owned N    Stop replay with 0..8 acquired relics\n"
                 "  --equipment-smoke Verify safe inspection via mouse and keys 1-8\n"
@@ -433,6 +458,7 @@ struct ArtAssets {
 
 struct Session {
     ImVec2 lightMin{},lightMax{};
+    ImVec2 volumeMin[2]{},volumeMax[2]{};
     presentation::ScoreHistory history;
     bool menu = true;
     bool collection = false;
@@ -549,6 +575,7 @@ struct Commands {
             return;
         }
         used = true;
+        playSound(audio::Sfx::UiOpen);
         const auto& after = game->state();
         auto kind = ability ? presentation::Action::Ability : presentation::Action::Other;
         if (!ability && before.phase == bj::Phase::Ready && after.handsLeft < before.handsLeft)
@@ -611,18 +638,46 @@ void heading(const char* text, const Interface& ui) {
 }
 
 bool themedButton(const char* label, ImVec2 size, ImVec4 tone, bool closing) {
-    const auto p = ImGui::GetCursorScreenPos();
-    auto* draw = ImGui::GetWindowDrawList();
-    if (size.x > 0 && size.y > 0)
-        draw->AddRectFilled({p.x+1,p.y+4},{p.x+size.x+1,p.y+size.y+4},IM_COL32(0,0,0,75),8);
-    ImGui::PushStyleColor(ImGuiCol_Button,tone);
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,{std::min(1.0f,tone.x+.07f),std::min(1.0f,tone.y+.07f),std::min(1.0f,tone.z+.07f),1});
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive,{tone.x*.78f,tone.y*.78f,tone.z*.78f,1});
+    // Keep the native hit box, layout and keyboard navigation. Only the face moves inside it.
+    const ImVec4 transparent{0,0,0,0};
+    ImGui::PushStyleColor(ImGuiCol_Button,transparent);
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered,transparent);
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive,transparent);
+    ImGui::PushStyleColor(ImGuiCol_Text,transparent);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize,0);
     const bool pressed=ImGui::Button(label,size);
-    ImGui::PopStyleColor(3);
-    const auto end=ImGui::GetItemRectMax();
-    palace::buttonFrame(draw,p,end,ImGui::IsItemHovered(),ImGui::IsItemActive(),ImGui::GetStyle().Alpha<.8f);
-    draw->AddLine({p.x+9,p.y+1},{end.x-9,p.y+1},IM_COL32(255,237,201,40));
+    ImGui::PopStyleVar();
+    ImGui::PopStyleColor(4);
+    const auto p=ImGui::GetItemRectMin(),end=ImGui::GetItemRectMax();
+    const bool disabled=ImGui::GetStyle().Alpha<.8f;
+    const bool highlighted=!disabled&&(ImGui::IsItemHovered()||(ImGui::GetIO().NavVisible&&ImGui::IsItemFocused()));
+    const bool held=!disabled&&ImGui::IsItemActive();
+    ImGui::PushID(label);
+    const auto hoverId=ImGui::GetID("hover-motion"),pressId=ImGui::GetID("press-motion"),frameId=ImGui::GetID("motion-frame");
+    ImGui::PopID();
+    auto* storage=ImGui::GetStateStorage();
+    const bool continuous=storage->GetInt(frameId,-2)==ImGui::GetFrameCount()-1;
+    const float amount=1-std::exp(-std::min(ImGui::GetIO().DeltaTime,.1f)*14.0f);
+    const float priorHover=continuous?storage->GetFloat(hoverId):0;
+    const float priorPress=continuous?storage->GetFloat(pressId):0;
+    const float hover=priorHover+((highlighted?1.0f:0.0f)-priorHover)*amount;
+    const float press=priorPress+((held?1.0f:0.0f)-priorPress)*amount;
+    storage->SetFloat(hoverId,hover);storage->SetFloat(pressId,press);storage->SetInt(frameId,ImGui::GetFrameCount());
+    const bool handAction=std::strcmp(label,"HIT")==0||std::strcmp(label,"STAND")==0||std::strcmp(label,"ACCEPT BUST")==0;
+    const float travel=handAction?1.0f:std::min(2.4f,(end.y-p.y)*.04f);
+    const float lift=travel*hover*(1-press);
+    const ImVec2 faceMin{p.x+1.5f,p.y+3.0f-lift+press},faceMax{end.x-1.5f,end.y-2.0f-lift+press};
+    auto* draw=ImGui::GetWindowDrawList();
+    draw->PushClipRect(p,end,true);
+    draw->AddRectFilled({p.x+2,p.y+4},{end.x-2,end.y-1},ImGui::GetColorU32({0,0,0,.36f}),6);
+    const float brightness=.065f*hover-.045f*press;
+    const ImVec4 face{std::clamp(tone.x+brightness,0.0f,1.0f),std::clamp(tone.y+brightness,0.0f,1.0f),std::clamp(tone.z+brightness,0.0f,1.0f),tone.w};
+    draw->AddRectFilled(faceMin,faceMax,ImGui::GetColorU32(face),5);
+    palace::buttonFrame(draw,faceMin,faceMax,hover,press,disabled);
+    const auto textSize=ImGui::CalcTextSize(label,nullptr,true);
+    const char* labelEnd=std::strstr(label,"##");
+    draw->AddText({(faceMin.x+faceMax.x-textSize.x)*.5f,(faceMin.y+faceMax.y-textSize.y)*.5f},ImGui::GetColorU32(ImGuiCol_Text),label,labelEnd);
+    draw->PopClipRect();
     buttonSounds(pressed,closing);
     return pressed;
 }
@@ -944,7 +999,9 @@ void drawRelicStrip(const bj::Snapshot& state, const presentation::Presentation&
         }
         const auto id=state.owned[static_cast<std::size_t>(slot)];const auto status=bj::abilityStatus(game.state(),id);
         ImGui::SetCursorPos({x,y});
-        if(ImGui::Selectable("##slot",session.selectedEquipment==slot,0,{cell-9,47})) {
+        const bool selectedSlot=ImGui::Selectable("##slot",session.selectedEquipment==slot,0,{cell-9,47});
+        buttonSounds(selectedSlot,false);
+        if(selectedSlot) {
             if(session.selectedEquipment==slot) session.clearEquipmentContext();
             else {session.selectedEquipment=slot;session.inspectedRelic=id;}
         }
@@ -1230,7 +1287,9 @@ void drawShop(bj::Game& game, Commands& commands, Session& session, const Interf
         draw->AddText(ui.small,std::min(18.0f,18*(cellWidth-64)/textWidth),{origin.x+57,origin.y+10},ImGui::ColorConvertFloat4ToU32(cream),item.name);
         draw->AddText(ui.small,14,{origin.x+57,origin.y+32},ImGui::ColorConvertFloat4ToU32(rarityColor(item.rarity)),bj::rarityName(item.rarity));
         ImGui::SetCursorPos({start.x+6,start.y+4});
-        if(ImGui::InvisibleButton("select",{cellWidth-12,49})) session.shopReplacement=selected?-1:i;
+        const bool selectReplacement=ImGui::InvisibleButton("select",{cellWidth-12,49});
+        buttonSounds(selectReplacement,false);
+        if(selectReplacement) session.shopReplacement=selected?-1:i;
         if(ImGui::IsItemHovered()) relicTooltip(item,ui);
         ImGui::SetCursorPos({start.x+7,start.y+59});ImGui::PushFont(ui.small);
         ImGui::BeginDisabled(commands.blocked||commands.used);
@@ -1493,8 +1552,10 @@ void drawRules(Session& session, const Interface& ui) {
     ImGui::SetNextWindowPos({display.x * .5f - 310, display.y * .5f - 270});
     ImGui::SetNextWindowSize({620, 540});
     ImGui::SetNextWindowFocus();
-    if (ImGui::Begin("HOW TO PLAY", &session.rules, ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoResize |
-        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse)) {
+    const bool visible=ImGui::Begin("HOW TO PLAY", &session.rules, ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoResize |
+        ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
+    if(!session.rules) playSound(audio::Sfx::UiClose);
+    if(visible) {
         palace::panelFrame(ImGui::GetWindowDrawList(),ImGui::GetWindowPos(),ImGui::GetWindowSize(),true);
         heading("THE FOOL'S TABLE", ui);
         ImGui::PushFont(ui.small);
@@ -1517,28 +1578,51 @@ void resetCamera(gfx::RenderSettings& settings) {
     settings.distance=defaults.distance;
 }
 
-void drawSettings(Session& session, gfx::RenderSettings& settings, const Interface& ui) {
-    if(!session.settings) return;
+bool drawSettings(Session& session, gfx::RenderSettings& settings, const Interface& ui,
+                  audio::Preferences& volumes, bool saveFailed) {
+    if(!session.settings) return false;
+    bool changed=false;
     const auto display=ImGui::GetIO().DisplaySize;
     const float height=std::min(620.0f,display.y-48);
     ImGui::SetNextWindowPos({(display.x-470)*.5f,(display.y-height)*.5f});
     ImGui::SetNextWindowSize({470,height});ImGui::SetNextWindowFocus();
-    if(ImGui::Begin("SETTINGS",&session.settings,ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_NoScrollbar)) {
+    const bool visible=ImGui::Begin("SETTINGS",&session.settings,ImGuiWindowFlags_NoSavedSettings|ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_NoScrollbar);
+    if(!session.settings) playSound(audio::Sfx::UiClose);
+    if(visible) {
         palace::panelFrame(ImGui::GetWindowDrawList(),ImGui::GetWindowPos(),ImGui::GetWindowSize(),true);
         heading("THE PROJECTION ROOM",ui);
         ImGui::BeginChild("settings-body",{0,ImGui::GetContentRegionAvail().y-58},false);
         ImGui::PushFont(ui.small);
-        if(ImGui::Checkbox("Lighting",&settings.lighting)) playSound(audio::Sfx::UiOpen);
+        ImGui::TextColored(gold,"SOUND");
+        const char* labels[]={"Music","Effects"};
+        float* gains[]={&volumes.music,&volumes.effects};
+        for(int i=0;i<2;++i) {
+            float percent=*gains[i]*100.0f;
+            if(ImGui::SliderFloat(labels[i],&percent,0.0f,100.0f,"%.0f%%",ImGuiSliderFlags_AlwaysClamp)) {
+                *gains[i]=percent*.01f;
+                changed=true;
+            }
+            buttonSounds(ImGui::IsItemActivated(),false);
+            session.volumeMin[i]=ImGui::GetItemRectMin();
+            session.volumeMax[i]={session.volumeMin[i].x+ImGui::CalcItemWidth(),ImGui::GetItemRectMax().y};
+        }
+        ImGui::TextColored(muted,"Effects: cards, chips, buttons and the car.");
+        if(saveFailed) ImGui::TextWrapped("Volume works for this session, but could not be saved.");
+        ImGui::Spacing();ImGui::Separator();ImGui::Spacing();
+        ImGui::TextColored(gold,"DISPLAY");
+        buttonSounds(ImGui::Checkbox("Lighting",&settings.lighting),false);
         ImGui::SameLine(225);
-        if(ImGui::Checkbox("Textures",&settings.textures)) playSound(audio::Sfx::UiOpen);
-        if(ImGui::Checkbox("Ambient motion",&settings.animate)) playSound(audio::Sfx::UiOpen);
-        if(ImGui::Checkbox("Cinematic entrance",&session.transitions)) playSound(audio::Sfx::UiOpen);
+        buttonSounds(ImGui::Checkbox("Textures",&settings.textures),false);
+        buttonSounds(ImGui::Checkbox("Ambient motion",&settings.animate),false);
+        buttonSounds(ImGui::Checkbox("Cinematic entrance",&session.transitions),false);
         ImGui::TextColored(muted,"Off: a short fade. Escape skips the entrance.");
         ImGui::Spacing();ImGui::TextColored(gold,"HOUSE LIGHTS");
         ImGui::SliderFloat("Light",&settings.lightIntensity,gfx::minLight,gfx::maxLight);
+        buttonSounds(ImGui::IsItemActivated(),false);
         session.lightMin=ImGui::GetItemRectMin();session.lightMax={session.lightMin.x+ImGui::CalcItemWidth(),ImGui::GetItemRectMax().y};
         ImGui::Spacing();ImGui::TextColored(gold,"DEALING SPEED");
         ImGui::SliderFloat("##speed",&session.animationSpeed,0.0f,1.0f,"");
+        buttonSounds(ImGui::IsItemActivated(),false);
         ImGui::TextColored(muted,"Natural                                    Fast");
         ImGui::TextWrapped("Click or press Space to speed up a deal or reward.");
         ImGui::Spacing();ImGui::TextColored(gold,"AT THE TABLE");
@@ -1549,6 +1633,7 @@ void drawSettings(Session& session, gfx::RenderSettings& settings, const Interfa
         ImGui::SameLine();if(backButton("DONE",{200,42},{.17f,.28f,.23f,1})) session.settings=false;
     }
     ImGui::End();
+    return changed;
 }
 
 gfx::Scene makeScene(const presentation::Presentation& timeline, float time, const Session& session) {
@@ -1608,7 +1693,7 @@ void drawPhysicalEquipment(const gfx::Scene& scene, const gfx::RenderSettings& s
         session.physicalChipHovered=true;session.hoveredRelic=static_cast<int>(i);
         session.relicHover[i]=approach(session.relicHover[i],true);
         session.inspectedRelic=static_cast<bj::Relic>(scene.equipment[i].id);
-        if(ImGui::IsMouseClicked(0)) session.selectedEquipment=static_cast<int>(i);
+        if(ImGui::IsMouseClicked(0)) {session.selectedEquipment=static_cast<int>(i);playSound(audio::Sfx::UiOpen);}
         break;
     }
     if(ImGui::IsMouseClicked(0)&&!session.physicalChipHovered&&io.MousePos.x>layout.contentX&&io.MousePos.y>layout.boardY&&
@@ -1676,9 +1761,10 @@ void drawCollection(Session& session, const Interface& ui, const ArtAssets& art)
         ImGui::PushStyleColor(ImGuiCol_Header,{0,0,0,0});
         ImGui::PushStyleColor(ImGuiCol_HeaderHovered,{0,0,0,0});
         ImGui::PushStyleColor(ImGuiCol_HeaderActive,{0,0,0,0});
-        if(ImGui::Selectable("##relic",selected,0,{w,cellHeight})) {
+        const bool selectedRelic=ImGui::Selectable("##relic",selected,0,{w,cellHeight});
+        buttonSounds(selectedRelic,false);
+        if(selectedRelic) {
             session.selectedRelic=item.id;
-            playSound(audio::Sfx::UiOpen);
         }
         ImGui::PopStyleColor(3);
         const bool hovered=ImGui::IsItemHovered()||ImGui::IsItemFocused();
@@ -1732,6 +1818,7 @@ bj::StartDeck deckAt(int index) {
 }
 
 void browseDeck(Session& session,int direction) {
+    playSound(audio::Sfx::UiOpen);
     session.selectedDeck=deckAt(deckIndex(session.selectedDeck)+direction);
     session.deckDirection=direction;
     session.deckMotion=1;
@@ -1902,7 +1989,12 @@ int main(int argc, char** argv) {
         gfx::Renderer renderer(assets);
         ArtAssets art(assets);
         // Hidden runs (smoke, screenshots, captures) are silent; so is any missing audio folder.
-        audio::Engine sound(assets / "audio", !options.hidden);
+        const auto audioSettingsPath=!options.audioSettings.empty()?options.audioSettings:
+            options.hidden?std::filesystem::path{}:audio::defaultPreferencesPath();
+        auto volumes=audio::Preferences::load(audioSettingsPath);
+        bool volumeDirty=false,volumeSaveFailed=false;
+        double volumeEditedAt=0;
+        audio::Engine sound(assets / "audio", !options.hidden,volumes.music,volumes.effects);
         gfx::RenderSettings settings;
         settings.animate = !options.noAmbientMotion;
         settings.lightIntensity=options.light;
@@ -1985,9 +2077,9 @@ int main(int argc, char** argv) {
                 scene.band.beats=sync.beatAt(clock.position);
                 scene.band.bpm=static_cast<float>(sync.bpm());
                 scene.band.low=energy.low;scene.band.mid=energy.mid;scene.band.high=energy.high;scene.band.hit=energy.hit;
-            } else if(!sound.active()) {
+            } else if(!sound.active()||clock.track>=0) {
                 scene.band.playing=true;
-                scene.band.beats=sceneTime*110.0/60.0;
+                scene.band.beats=(sound.active()?clock.position:sceneTime)*110.0/60.0;
                 scene.band.bpm=110.0f;
                 scene.band.low=scene.band.mid=scene.band.high=scene.band.hit=.7f;
             } else {
@@ -2041,6 +2133,25 @@ int main(int argc, char** argv) {
             }
             ImGui_ImplOpenGL3_NewFrame();
             ImGui_ImplGlfw_NewFrame();
+            if(options.audioSmoke) {
+                if(frame==8) session.settings=true;
+                auto& input=ImGui::GetIO();
+                constexpr float fractions[]={0.0f,.70f,0.0f,.35f};
+                for(int step=0;step<4;++step) {
+                    const int down=12+step*10,channel=step/2;
+                    if(frame==down||frame==down+1) {
+                        const auto a=session.volumeMin[channel],b=session.volumeMax[channel];
+                        const float grab=ImGui::GetStyle().GrabMinSize*.5f+2;
+                        input.AddMousePosEvent(a.x+grab+(b.x-a.x-2*grab)*fractions[step],(a.y+b.y)*.5f);
+                        input.AddMouseButtonEvent(0,frame==down);
+                    }
+                    if(frame==down+4) {
+                        const float actual=channel==0?volumes.music:volumes.effects;
+                        if(std::abs(actual-fractions[step])>.015f) throw std::runtime_error("Audio slider input failed");
+                        std::cout<<"Live "<<(channel==0?"music":"effects")<<" volume: "<<actual<<'\n';
+                    }
+                }
+            }
             if(options.lightSmoke) {
                 auto& input=ImGui::GetIO();
                 for(int phase=0;phase<3;++phase) {
@@ -2163,7 +2274,7 @@ int main(int argc, char** argv) {
             }
             ImGui::NewFrame();
             beginSoundFrame();
-            hoverSoundsEnabled=session.menu;
+            hoverSoundsEnabled=!session.transitioning();
             if(!options.captures.empty()) {
                 const auto display=ImGui::GetIO().DisplaySize;
                 const auto size=std::make_pair(static_cast<int>(display.x),static_cast<int>(display.y));
@@ -2175,7 +2286,7 @@ int main(int argc, char** argv) {
             Commands commands{overlay || wasBusy,false,&game,&timeline};
             if(ImGui::IsKeyPressed(ImGuiKey_Escape,false)) {
                 // Every Escape that steps back (closes a panel, goes up a level) plays the close sound.
-                if(session.transitioning()) session.entrance.skip();
+                if(session.transitioning()) {session.entrance.skip();playSound(audio::Sfx::UiClose);}
                 else if(session.rules) {session.rules=false;playSound(audio::Sfx::UiClose);}
                 else if(session.settings) {session.settings=false;playSound(audio::Sfx::UiClose);}
                 else if(session.collection) {session.collection=false;playSound(audio::Sfx::UiClose);}
@@ -2200,6 +2311,7 @@ int main(int argc, char** argv) {
                 for(std::size_t i=0;i<owned.size();++i) if(ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_1+static_cast<int>(i)),false)) {
                     session.selectedEquipment=static_cast<int>(i);session.inspectedRelic=owned[i];
                     session.suppressEquipmentHover=true;
+                    playSound(audio::Sfx::UiOpen);
                 }
                 if(ImGui::IsKeyPressed(ImGuiKey_A,false)&&session.selectedEquipment>=0&&session.selectedEquipment<static_cast<int>(owned.size()))
                     commands.apply([&]{return game.activate(owned[static_cast<std::size_t>(session.selectedEquipment)]);},true);
@@ -2210,10 +2322,10 @@ int main(int argc, char** argv) {
                 if(ImGui::IsKeyPressed(ImGuiKey_H,false)) commands.apply([&](){return game.hit();});
                 if(ImGui::IsKeyPressed(ImGuiKey_S,false)) commands.apply([&](){return game.stand();});
                 if(space && !commands.used) {
-                    if(session.menu) session.deckSelection=true;
+                    if(session.menu) {session.deckSelection=true;playSound(audio::Sfx::UiOpen);}
                     else if(game.state().phase==bj::Phase::RunLost) {
                         if(game.state().revivesLeft>0) commands.apply([&](){return game.revive();});
-                        else session.start(game);
+                        else {session.start(game);playSound(audio::Sfx::UiOpen);}
                     } else primaryAction(game,commands);
                 }
             }
@@ -2227,34 +2339,9 @@ int main(int argc, char** argv) {
                 } else if(session.menu && !options.smoke) session.start(game);
                 else autoplayStep(game,commands);
             }
-            for(const auto cue:timeline.takeCues()) playCue(cue);
-            // Main theme in every menu screen until the run begins; shuffled soundtracks from then on.
-            sound.setMusic(session.menu&&!session.transitioning()?audio::MusicMode::Menu:audio::MusicMode::Game);
-            sound.setDucked(!session.menu&&session.gameOverElapsed>0.0f); // Leave room for the game-over sound.
             feedback.observe(settledState(timeline),dt,!session.menu && !session.transitioning());
             session.syncEquipmentContext(game.state());
             const float sceneTime=options.hidden && options.frames>0 ? frame/60.0f : static_cast<float>(now);
-            {
-                // The sedan crosses the street once every 32 s (see Renderer::drawMenuSedan). Its recording
-                // starts at the same cycle position, so the engine, the stereo sweep and the loudest instant
-                // of the pass coincide with the car's movement on screen. It fades out when the player
-                // starts the game, or when ambient motion (and with it the car) is switched off.
-                constexpr double carCycle=32.0,carAudioLength=17.3,carAudioAhead=.45;
-                if(session.menu&&settings.animate&&!session.transitioning()) {
-                    const double t=std::max(0.0,static_cast<double>(sceneTime));
-                    const int cycle=static_cast<int>(t/carCycle);
-                    const double phase=t-cycle*carCycle;
-                    if(carSoundCycle!=cycle&&phase+carAudioAhead<carAudioLength) {
-                        sound.carPass(phase+carAudioAhead);
-                        carSoundCycle=cycle;
-                        carSoundActive=true;
-                    }
-                } else if(carSoundActive) {
-                    sound.carStop(1.2);
-                    carSoundActive=false;
-                    carSoundCycle=-1;
-                }
-            }
             auto scene=makeScene(timeline,sceneTime,session);
             conduct(scene,sceneTime);
             drawPhysicalEquipment(scene,settings,width,height,game,commands,session,interface);
@@ -2265,9 +2352,39 @@ int main(int argc, char** argv) {
             drawCardChoices(game,commands,interface,session);
             drawDeckSelection(game,session,interface,art);
             drawCollection(session,interface,art);
-            drawSettings(session,settings,interface);
+            if(drawSettings(session,settings,interface,volumes,volumeSaveFailed)) {
+                sound.setVolumes(volumes.music,volumes.effects);
+                volumeDirty=true;
+                volumeEditedAt=now;
+                volumeSaveFailed=false;
+            }
             drawRules(session,interface);
             ImGui::EndDisabled();
+            // Apply while dragging; save on release, close, or after keyboard edits settle.
+            if(volumeDirty&&(!session.settings||ImGui::IsMouseReleased(0)||
+                (!ImGui::IsMouseDown(0)&&now-volumeEditedAt>.4))) {
+                if(!audioSettingsPath.empty()) volumeSaveFailed=!volumes.save(audioSettingsPath);
+                volumeDirty=false;
+            }
+            // Drain after both keyboard and mouse actions so either input starts audio on this frame.
+            for(const auto cue:timeline.takeCues()) playCue(cue);
+            if(pendingUiSound!=audio::Sfx::Count) sound.play(pendingUiSound);
+            pendingUiSound=audio::Sfx::Count;
+            sound.setMusic(session.menu&&!session.transitioning()?audio::MusicMode::Menu:audio::MusicMode::Game);
+            sound.setDucked(!session.menu&&session.gameOverElapsed>0.0f);
+            // The same street phase drives rendering and the recording; its peak matches the midpoint.
+            if(session.menu&&settings.animate&&!session.transitioning()&&presentation::CarPass::visible(sceneTime)) {
+                const int cycle=static_cast<int>(sceneTime/presentation::CarPass::cycleSeconds);
+                if(carSoundCycle!=cycle) {
+                    sound.carPass(presentation::CarPass::recordingOffset(sceneTime));
+                    carSoundCycle=cycle;
+                    carSoundActive=true;
+                }
+            } else if(carSoundActive) {
+                sound.carStop(1.2);
+                carSoundActive=false;
+                carSoundCycle=-1;
+            }
             if(options.abilitySmoke) {
                 const auto used=game.state().usedHandAbilities.size()+game.state().usedRoundAbilities.size();
                 if(used>abilityCountBefore) ++abilityActivations;
@@ -2453,6 +2570,7 @@ int main(int argc, char** argv) {
                 break;
             }
         }
+        if(volumeDirty&&!audioSettingsPath.empty()) volumes.save(audioSettingsPath);
         std::cout << "Rendered frames: " << frame << '\n';
         if(options.smoke) std::cout << "Smoke: collection="<<smokeCollection<<" decks="<<smokeDeck
             <<" dealt="<<smokeDealt<<" resolved="<<smokeStood<<" revived="<<smokeRevived

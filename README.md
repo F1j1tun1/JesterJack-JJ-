@@ -12,6 +12,8 @@ Download this repository using **Code → Download ZIP**, extract the entire arc
 - **Right-drag / wheel:** rotate / zoom the camera. Double right-click resets it.
 - **F1:** options. **Escape:** close the current panel or return to the menu.
 
+Options has separate **Music** and **Effects** volume sliders. Changes apply immediately and are remembered between launches; 0% mutes that channel.
+
 Reach each round's target within the available hands. Wins earn coins for relics; failing a round ends the run. Full rules are in HOW TO PLAY.
 
 ## Build
@@ -29,4 +31,4 @@ ctest --test-dir build/desktop -C Release --output-on-failure
 
 `scripts/run.ps1 -Release` also builds, tests and starts the game. The source code is in `src/`; resources are in `assets/`. Preserve the included library, font and asset notices in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-This version matches the verified desktop package from 3 November 2026, based on [Final-Project-CGF commit 7cf4bde](https://github.com/F1j1tun1/Final-Project-CGF/commit/7cf4bde215c5310d6b04d83fe90f752bfd2037be). The ready Windows executable and matching source are included together.
+Build: 5 November 2026. Updated audio, volume settings, stage musicians and button motion. The ready Windows executable and matching source are included together.

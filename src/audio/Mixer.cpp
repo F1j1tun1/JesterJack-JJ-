@@ -1,6 +1,7 @@
 #include "audio/Mixer.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <system_error>
 
 namespace audio {
@@ -39,7 +40,10 @@ namespace {
 bool isUi(Sfx sound) { return static_cast<std::size_t>(sound) >= static_cast<std::size_t>(Sfx::UiOpen); }
 } // namespace
 
-const char* sfxFile(Sfx sound) { return sfxFiles[static_cast<std::size_t>(sound)]; }
+const char* sfxFile(Sfx sound) {
+    const auto index = static_cast<std::size_t>(sound);
+    return index < sfxCount ? sfxFiles[index] : "";
+}
 
 Mixer::Mixer(Backend& backend, std::filesystem::path root, std::uint32_t seed, Levels levels)
     : backend_(backend), root_(std::move(root)), levels_(levels),
@@ -48,7 +52,7 @@ Mixer::Mixer(Backend& backend, std::filesystem::path root, std::uint32_t seed, L
         const auto file = root_ / sfxFiles[sound];
         std::error_code error;
         if (!std::filesystem::exists(file, error)) continue;
-        const float volume = isUi(static_cast<Sfx>(sound)) ? levels_.ui : levels_.sfx;
+        const float volume = effectVolume(static_cast<Sfx>(sound));
         for (std::size_t voice = 0; voice < voicesPerSound; ++voice) {
             auto& slot = voices_[sound][voice];
             slot.alias = "jjs" + std::to_string(sound) + "v" + std::to_string(voice);
@@ -59,7 +63,7 @@ Mixer::Mixer(Backend& backend, std::filesystem::path root, std::uint32_t seed, L
     std::error_code error;
     if (std::filesystem::exists(root_ / carFile, error)) {
         carReady_ = backend_.open(carAlias, root_ / carFile);
-        if (carReady_) backend_.setVolume(carAlias, levels_.car);
+        if (carReady_) backend_.setVolume(carAlias, carVolume());
     }
 }
 
@@ -107,18 +111,34 @@ void Mixer::setDucked(bool ducked) {
     if (musicOpen_) backend_.setVolume(musicAlias, musicVolume());
 }
 
+void Mixer::setVolumes(float music, float effects) {
+    const float nextMusic = std::isfinite(music) ? std::clamp(music, 0.0f, 1.0f) : musicGain_;
+    const float nextEffects = std::isfinite(effects) ? std::clamp(effects, 0.0f, 1.0f) : effectsGain_;
+    if (nextMusic != musicGain_) {
+        musicGain_ = nextMusic;
+        if (musicOpen_) backend_.setVolume(musicAlias, musicVolume());
+    }
+    if (nextEffects == effectsGain_) return;
+    effectsGain_ = nextEffects;
+    for (std::size_t sound = 0; sound < sfxCount; ++sound)
+        for (const auto& voice : voices_[sound])
+            if (voice.ready) backend_.setVolume(voice.alias, effectVolume(static_cast<Sfx>(sound)));
+    if (carReady_) backend_.setVolume(carAlias, carVolume());
+}
+
 void Mixer::startCarPass(double offsetSeconds) {
     if (!carReady_) return;
     carFading_ = false;
     backend_.stop(carAlias);
-    backend_.setVolume(carAlias, levels_.car);
-    backend_.playFrom(carAlias, std::max(0.0, offsetSeconds));
+    backend_.setVolume(carAlias, carVolume());
+    backend_.playFrom(carAlias, std::isfinite(offsetSeconds) ? std::max(0.0, offsetSeconds) : 0.0);
     carPlaying_ = true;
+    carStartedAt_ = now_;
 }
 
 void Mixer::stopCarPass(double fadeSeconds) {
     if (!carReady_ || !carPlaying_) return;
-    if (fadeSeconds <= 0.0) {
+    if (!std::isfinite(fadeSeconds) || fadeSeconds <= 0.0) {
         backend_.stop(carAlias);
         carPlaying_ = carFading_ = false;
         return;
@@ -130,14 +150,17 @@ void Mixer::stopCarPass(double fadeSeconds) {
 }
 
 void Mixer::tick(double now) {
+    if (!std::isfinite(now) || now < now_) return;
     now_ = now;
+    if (carPlaying_ && now_ - carStartedAt_ >= startGrace && !backend_.playing(carAlias))
+        carPlaying_ = carFading_ = false;
     if (carFading_) {
         const double gain = 1.0 - (now_ - carFadeStart_) / carFadeLength_;
         if (gain <= 0.0) {
             backend_.stop(carAlias);
             carPlaying_ = carFading_ = false;
         } else {
-            backend_.setVolume(carAlias, levels_.car * static_cast<float>(gain));
+            backend_.setVolume(carAlias, carVolume());
         }
     }
     status_ = MusicStatus{};
@@ -154,7 +177,19 @@ void Mixer::tick(double now) {
     else startNextSoundtrack();
 }
 
-float Mixer::musicVolume() const { return levels_.music * (ducked_ ? levels_.duck : 1.0f); }
+float Mixer::musicVolume() const { return levels_.music * musicGain_ * (ducked_ ? levels_.duck : 1.0f); }
+
+float Mixer::effectVolume(Sfx sound) const {
+    // Keep the supplied deal MP3 unchanged while leaving room for its decoder overshoot.
+    const float base = isUi(sound) ? levels_.ui : levels_.sfx * (sound == Sfx::CardDeal ? .9f : 1.0f);
+    return base * effectsGain_;
+}
+
+float Mixer::carVolume() const {
+    const float fade = carFading_ ? static_cast<float>(std::clamp(
+        1.0 - (now_ - carFadeStart_) / carFadeLength_, 0.0, 1.0)) : 1.0f;
+    return levels_.car * effectsGain_ * fade;
+}
 
 bool Mixer::startMusic(const std::filesystem::path& file) {
     stopMusic();
@@ -181,8 +216,15 @@ void Mixer::startNextSoundtrack() {
         return;
     }
     // A damaged file is skipped; a whole failed cycle gives up until the mode changes.
-    for (std::size_t attempt = 0; attempt < soundtracks_.size(); ++attempt) {
+    std::vector<bool> tried(soundtracks_.size(), false);
+    std::size_t remaining = soundtracks_.size();
+    while (remaining > 0) {
         const std::size_t index = playlist_.next();
+        // A refill may repeat a failed item before reaching another playable one.
+        // Check each distinct candidate before declaring that the whole set failed.
+        if (tried[index]) continue;
+        tried[index] = true;
+        --remaining;
         if (startMusic(soundtracks_[index])) {
             currentIndex_ = static_cast<int>(index);
             return;
@@ -192,6 +234,7 @@ void Mixer::startNextSoundtrack() {
 }
 
 void Mixer::stopMusic() {
+    status_ = MusicStatus{};
     if (!musicOpen_) return;
     backend_.stop(musicAlias);
     backend_.close(musicAlias);

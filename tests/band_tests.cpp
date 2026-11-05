@@ -149,6 +149,59 @@ void bandIsSmooth() {
     check(mismatched < 40, "The part list stays stable from frame to frame");
 }
 
+void sleevesRemainReachable() {
+    // The tailored upper/lower sleeves have fixed cross-sections. Inspect the rendered geometry,
+    // not a duplicate IK calculation: an unreachable instrument grip must not stretch a forearm.
+    float longest = 0;
+    double worstBeat = 0;
+    glm::vec3 longestCentre(0);
+    bool complete = true;
+    for (const float bpm : {78.95f, 157.89f})
+        for (const float energy : {.05f, .8f, .95f})
+            for (double beats = 0; beats < 64; beats += .13) {
+                const auto parts = pose(beats, energy, bpm);
+                int sleeves = 0;
+                for (const auto& part : parts) {
+                    if (part.shape != gfx::band::Shape::Cylinder) continue;
+                    const float x = glm::length(glm::vec3(part.model[0]));
+                    const float z = glm::length(glm::vec3(part.model[2]));
+                    if (std::abs(x - .034f) > .00001f || std::abs(z - .034f) > .00001f) continue;
+                    ++sleeves;
+                    const float length = glm::length(glm::vec3(part.model[1]));
+                    if (length > longest) { longest = length; worstBeat = beats; longestCentre = centre(part); }
+                }
+                complete = complete && sleeves == 10;
+            }
+    if (longest > .265f) std::cerr << "Longest forearm sleeve " << longest << " m at beat " << worstBeat
+        << " centre " << longestCentre.x << ',' << longestCentre.y << ',' << longestCentre.z << '\n';
+    check(complete, "All ten forearm sleeves remain present through the performance");
+    check(longest <= .265f, "Instrument targets stay within adult arm reach without stretching the forearm");
+}
+
+void swingBoundariesStayContinuous() {
+    bool finite = true, stable = true;
+    float worst = 0;
+    glm::vec3 worstCentre(0);
+    double worstAt = 0;
+    for (const float bpm : {78.95f, 103.45f, 130.43f, 157.89f})
+        for (const float energy : {.05f, .95f})
+            for (int beat = 0; beat < 32; ++beat)
+                for (const double offset : {0.0, 2.0 / 3.0}) {
+                    const double at = (beat + offset) * (bpm > gfx::band::maxPulseBpm ? 2.0 : 1.0);
+                    const auto before = pose(at - .0001, energy, bpm), after = pose(at + .0001, energy, bpm);
+                    stable = stable && before.size() == after.size();
+                    for (std::size_t i = 0; i < std::min(before.size(), after.size()); ++i) {
+                        const float jump = glm::length(centre(after[i]) - centre(before[i]));
+                        finite = finite && std::isfinite(jump);
+                        if (jump > worst) { worst = jump; worstCentre = centre(after[i]); worstAt = at; }
+                    }
+                }
+    if (worst > .012f) std::cerr << "Swing boundary jump " << worst << " m at " << worstAt
+        << " centre " << worstCentre.x << ',' << worstCentre.y << ',' << worstCentre.z << '\n';
+    check(finite && stable, "Quiet and loud performances keep a finite stable rig across swing and bar boundaries");
+    check(worst < .012f, "Fingers, valves and wrists do not jump when a swung note changes");
+}
+
 void intensityFollowsTheMusic() {
     using gfx::band::Musician;
     Playback quiet, loud;
@@ -176,6 +229,8 @@ int main() {
     bandIsWellFormed();
     bandIsDeterministicAndAlive();
     bandIsSmooth();
+    sleevesRemainReachable();
+    swingBoundariesStayContinuous();
     intensityFollowsTheMusic();
     std::cout << checks << " checks, " << failures << " failures\n";
     return failures == 0 ? 0 : 1;

@@ -1,6 +1,7 @@
 #include "presentation/Presentation.hpp"
 #include "presentation/ScoreHistory.hpp"
 #include "presentation/CollectionOrder.hpp"
+#include "presentation/CarPass.hpp"
 #include <algorithm>
 
 #include <cmath>
@@ -137,7 +138,10 @@ void naturalRevealAndRewards() {
     timeline.update(0.2f);
     check(timeline.dealerRevealed() && timeline.rewardStep() == 0 && timeline.rewardVisibleEffects() == 0,
           "Settled cards start reward playback at the base");
-    check(fingerprint(timeline.visible()) == fingerprint(after), "Reward playback uses the authoritative final snapshot");
+    auto rewardBase = after;
+    rewardBase.coins = before.coins;
+    check(fingerprint(timeline.visible()) == fingerprint(rewardBase),
+          "Reward playback holds the purse until the total while using the final scoring data");
     timeline.update(0.4f);
     check(timeline.rewardStep() == 1 && timeline.rewardVisibleEffects() == 1, "First applied effect follows the base");
     timeline.update(0.5f);
@@ -457,6 +461,109 @@ int countOf(const std::vector<Cue>& cues, Cue cue) {
     return static_cast<int>(std::count(cues.begin(), cues.end(), cue));
 }
 
+void coinsFollowRewardCue() {
+    auto before = playing();
+    before.player = cards({13, 6});
+    before.dealer = cards({10, 7});
+    before.coins = 17;
+    before.owned = {bj::Relic::CourtFavor, bj::Relic::VelvetDividend};
+    auto after = winFrom(before);
+    after.score.appliedEffects = {{bj::Relic::CourtFavor, 3, 0, 0.0f},
+                                 {bj::Relic::VelvetDividend, 0, 2, 0.0f}};
+    after.score.bonus = 3;
+    after.score.total = after.score.base + 3;
+    after.score.coins = 6;
+    after.coins = before.coins + after.score.coins;
+    after.roundScore = after.totalScore = after.score.total;
+    for (const float speed : {0.0f, 1.0f}) {
+        for (const bool skip : {false, true}) {
+            presentation::Presentation timeline;
+            timeline.begin(before, after, presentation::Action::Stand);
+            int coinCues = 0;
+            bool sawBase = false, sawEffect = false, sawTotal = false;
+            for (int frame = 0; frame < 1000; ++frame) {
+                const auto cues = timeline.takeCues();
+                const int received = countOf(cues, Cue::ChipsWon);
+                coinCues += received;
+                const int step = timeline.rewardStep();
+                if (step < 3) {
+                    check(timeline.visible().coins == before.coins && received == 0,
+                          "Cards, base and applied effects retain the prior purse without a coin cue");
+                } else {
+                    check(timeline.visible().coins == after.coins,
+                          "The total step exposes the complete authoritative purse");
+                    if (!sawTotal) check(received == 1,
+                        "The purse first changes in the same step that emits ChipsWon");
+                    sawTotal = true;
+                }
+                sawBase = sawBase || step == 0;
+                sawEffect = sawEffect || step == 1 || step == 2;
+                if (!timeline.busy()) break;
+                if (skip) timeline.accelerate();
+                else timeline.update(0.01f, speed);
+            }
+            check(sawBase && sawEffect && sawTotal && coinCues == 1,
+                  "Natural, fast and accelerated rewards each visit the stages and credit coins once");
+            check(fingerprint(timeline.visible()) == fingerprint(after),
+                  "Staging coin presentation never changes the final game snapshot");
+        }
+    }
+}
+
+void carPassTiming() {
+    using presentation::CarPass;
+    const auto near = [](double a, double b) { return std::abs(a - b) < 0.000001; };
+    check(CarPass::visible(0) && near(CarPass::distance(0), -18.0)
+          && near(CarPass::recordingOffset(0), 0.24),
+          "A pass begins at the street edge with its recording aligned 0.24 seconds ahead");
+    const double center = CarPass::visibleSeconds * 0.5;
+    check(CarPass::visible(center) && near(CarPass::distance(center), 0.0)
+          && near(CarPass::recordingOffset(center), CarPass::recordingPeak),
+          "The recording peak coincides with the car crossing the visible midpoint");
+    check(CarPass::visible(CarPass::visibleSeconds - 0.0001)
+          && !CarPass::visible(CarPass::visibleSeconds)
+          && !CarPass::visible(CarPass::cycleSeconds - 0.0001),
+          "The car leaves after 9.4 seconds and stays offscreen until the next cycle");
+    check(near(CarPass::distance(CarPass::visibleSeconds), 18.0),
+          "The visible route ends at the opposite street edge");
+    check(CarPass::visible(CarPass::cycleSeconds)
+          && near(CarPass::phase(CarPass::cycleSeconds), 0)
+          && near(CarPass::recordingOffset(CarPass::cycleSeconds), 0.24)
+          && near(CarPass::distance(CarPass::cycleSeconds), -18.0),
+          "The next 32-second cycle starts the same route and sound offset");
+    check(near(CarPass::recordingOffset(CarPass::cycleSeconds + center), CarPass::recordingPeak)
+          && !CarPass::visible(CarPass::cycleSeconds + CarPass::visibleSeconds + 0.0001),
+          "Later cycles keep their midpoint synchronization and offscreen interval");
+    check(near(CarPass::phase(-1), 0) && near(CarPass::recordingOffset(-1), 0.24),
+          "A negative preview time clamps to the start of the pass");
+}
+
+void settledLossCues() {
+    bool found = false;
+    for (std::uint32_t seed = 0; seed < 1000 && !found; ++seed) {
+        bj::Game game(seed);
+        game.deal();
+        if (game.state().phase != bj::Phase::PlayerTurn ||
+            bj::evaluateHand(game.state().dealer).total < game.state().dealerStand) continue;
+        const auto before = game.state();
+        game.stand();
+        const auto after = game.state();
+        if (after.outcome != bj::Outcome::Loss) continue;
+        found = true;
+        presentation::Presentation timeline;
+        timeline.begin(before, after, presentation::Action::Stand);
+        check(timeline.busy() && timeline.dealerFlipping() && timeline.takeCues().empty(),
+              "A real no-draw dealer loss still has a reveal stage before settlement");
+        timeline.accelerate();
+        const auto cues = timeline.takeCues();
+        check(!timeline.busy() && countOf(cues, Cue::HandLost) == 1 && cues.size() == 1,
+              "Settling a no-draw dealer loss emits HandLost exactly once");
+        check(fingerprint(timeline.visible()) == fingerprint(after),
+              "A no-draw loss keeps the authoritative settlement");
+    }
+    check(found, "A legal seeded no-draw dealer loss exercises the instant-settlement boundary");
+}
+
 void soundCues() {
     // Opening deal: one stake, then every one of the four cards is a "dealt" card.
     bj::Snapshot empty;
@@ -570,6 +677,9 @@ int main() {
     timingResetAndDeterminism();
     legendaryEffects();
     activeCardAlterations();
+    coinsFollowRewardCue();
+    carPassTiming();
+    settledLossCues();
     soundCues();
     std::cout << checks << " checks, " << failures << " failures\n";
     return failures == 0 ? 0 : 1;

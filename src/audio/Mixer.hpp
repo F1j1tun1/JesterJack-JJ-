@@ -74,6 +74,9 @@ public:
     void play(Sfx sound);
     void setMode(MusicMode mode);
     void setDucked(bool ducked);
+    // Independent 0..1 master gains on top of Levels. Non-finite values keep that channel unchanged.
+    // Applies to current and future playback without restarting the music or any effect.
+    void setVolumes(float music, float effects);
     // The street ambience: starts the recorded car pass `offsetSeconds` into the file (restarting it
     // if it is already playing) and fades it out over `fadeSeconds` when stopped.
     void startCarPass(double offsetSeconds);
@@ -97,6 +100,8 @@ private:
     Backend& backend_;
     std::filesystem::path root_;
     Levels levels_;
+    float musicGain_ = 1.0f;
+    float effectsGain_ = 1.0f;
     std::vector<std::filesystem::path> soundtracks_;
     ShufflePlaylist playlist_;
     std::array<std::array<Voice, voicesPerSound>, sfxCount> voices_;
@@ -111,11 +116,14 @@ private:
     bool carPlaying_ = false;
     bool carFading_ = false;
     double carFadeStart_ = 0.0, carFadeLength_ = 0.0;
+    double carStartedAt_ = 0.0;
     double now_ = 0.0;
     double startedAt_ = 0.0;
     int failures_ = 0;
 
     float musicVolume() const;
+    float effectVolume(Sfx sound) const;
+    float carVolume() const;
     bool startMusic(const std::filesystem::path& file);
     void startMenuTheme();
     void startNextSoundtrack();

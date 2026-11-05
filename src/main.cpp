@@ -817,12 +817,57 @@ void rarityBadge(bj::Rarity rarity, const Interface& ui) {
 }
 
 void drawCoinIcon(ImDrawList* draw, ImVec2 center, float radius, const Interface& ui) {
-    const ImU32 rim = IM_COL32(166, 103, 27, 255);
-    draw->AddCircleFilled({center.x - 7, center.y + 4}, radius, rim, 32);
-    draw->AddCircleFilled(center, radius, ImGui::ColorConvertFloat4ToU32(gold), 32);
-    draw->AddCircle(center, radius - 4, rim, 32, 2);
-    const ImVec2 mark = ui.button->CalcTextSizeA(26, 1000, 0, "$");
-    draw->AddText(ui.button, 26, {center.x - mark.x * .5f, center.y - mark.y * .5f}, rim, "$");
+    const float scale=radius/18.0f;
+    const ImU32 rim = ImGui::GetColorU32({166/255.0f,103/255.0f,27/255.0f,1});
+    draw->AddCircleFilled({center.x - 7*scale, center.y + 4*scale}, radius, rim, 32);
+    draw->AddCircleFilled(center, radius, ImGui::GetColorU32(gold), 32);
+    draw->AddCircle(center, radius - 4*scale, rim, 32, std::max(.75f,2*scale));
+    const float size=26*scale;
+    const ImVec2 mark = ui.button->CalcTextSizeA(size, 1000, 0, "$");
+    draw->AddText(ui.button, size, {center.x - mark.x * .5f, center.y - mark.y * .5f}, rim, "$");
+}
+
+// These reserve their complete text/icon footprint; no monetary value is encoded in an image.
+void shopCoinText(const std::string& label, const Interface& ui, ImVec4 color=gold) {
+    const float fontSize=ImGui::GetFontSize(),radius=fontSize*.38f,gap=6;
+    const auto textSize=ImGui::CalcTextSize(label.c_str());
+    const auto origin=ImGui::GetCursorScreenPos();
+    const float iconLeft=origin.x+textSize.x+gap;
+    ImGui::Dummy({textSize.x+gap+radius*(2+7.0f/18.0f),std::max(fontSize,radius*(2+4.0f/18.0f))});
+    auto* draw=ImGui::GetWindowDrawList();
+    draw->AddText(origin,ImGui::GetColorU32(color),label.c_str());
+    drawCoinIcon(draw,{iconLeft+radius*(1+7.0f/18.0f),origin.y+fontSize*.5f},radius,ui);
+}
+
+bool shopCoinButton(const std::string& caption, int amount, ImVec2 size, ImVec4 tone,
+                    const Interface& ui, const char* id) {
+    const float radius=std::min(size.y*.22f,ImGui::GetFontSize()*.35f);
+    const std::string text=caption+" "+std::to_string(amount);
+    const float gap=5,iconWidth=radius*(2+7.0f/18.0f);
+    // Blank display text leaves painting to this wrapper while the native button retains input,
+    // focus, disabled behavior, sound and a stable ID across changing prices.
+    const std::string label="##"+std::string(id);
+    const bool pressed=theatreButton(label.c_str(),size,tone);
+    const auto a=ImGui::GetItemRectMin(),b=ImGui::GetItemRectMax();
+    ImGui::PushID(label.c_str());
+    const auto hoverId=ImGui::GetID("hover-motion"),pressId=ImGui::GetID("press-motion");
+    ImGui::PopID();
+    const auto* storage=ImGui::GetStateStorage();
+    const float hover=storage->GetFloat(hoverId),press=storage->GetFloat(pressId);
+    const float lift=std::min(2.4f,(b.y-a.y)*.04f)*hover*(1-press);
+    const float fontSize=ImGui::GetFontSize();
+    const float available=std::max(1.0f,b.x-a.x-16-gap-iconWidth);
+    const float textWidth=ImGui::CalcTextSize(text.c_str()).x;
+    const float sizeText=fontSize*std::min(1.0f,available/std::max(1.0f,textWidth));
+    const auto fitted=ImGui::GetFont()->CalcTextSizeA(sizeText,10000,0,text.c_str());
+    const float x=(a.x+b.x-fitted.x-gap-iconWidth)*.5f;
+    const float y=(a.y+b.y)*.5f+.5f-lift+press;
+    auto* draw=ImGui::GetWindowDrawList();
+    draw->PushClipRect(a,b,true);
+    draw->AddText(ImGui::GetFont(),sizeText,{x,y-fitted.y*.5f},ImGui::GetColorU32(ImGuiCol_Text),text.c_str());
+    drawCoinIcon(draw,{x+fitted.x+gap+radius*(1+7.0f/18.0f),y},radius,ui);
+    draw->PopClipRect();
+    return pressed;
 }
 
 void drawChip(ImDrawList* draw, ImVec2 c, float r, const bj::RelicInfo& item,
@@ -885,12 +930,24 @@ struct TableLayout {
     float actionY;
 };
 
+struct EquipmentLayout {
+    float cell, radius, centerY, detailTop, detailHeight;
+    float bodyTop() const { return detailTop+40; }
+    float bottom() const { return detailTop+detailHeight; }
+};
+
+EquipmentLayout equipmentLayout(float contentWidth) {
+    const float radius=contentWidth<900?34.0f:40.0f;
+    const float centerY=28+radius;
+    return {contentWidth/8,radius,centerY,centerY+radius+8,94};
+}
+
 TableLayout tableLayout(ImVec2 display) {
     const float sidebar = std::clamp(display.x * .24f, 280.0f, 340.0f);
     const float contentX = sidebar + 24;
     const float actionY = display.y - 154;
     const float contentWidth=display.x-contentX-20;
-    const float boardY=148.0f;
+    const float boardY=equipmentLayout(contentWidth).bottom()+8;
     return {sidebar, contentX, contentWidth, boardY, display.y - boardY - 110, actionY};
 }
 
@@ -932,15 +989,19 @@ WrappedRelicText wrapRelicWords(ImFont* font, float size, float width, const cha
 }
 
 void verifyRelicTextLayout(const Interface& ui, const TableLayout& layout, ImVec2 display) {
-    const float width=layout.contentWidth-210;
+    const auto strip=equipmentLayout(layout.contentWidth);
+    const float width=layout.contentWidth-220;
     float maxBottom=0;
     for(const auto& item:bj::relicCatalog()) {
-        const auto wrapped=wrapRelicWords(ui.small,18,width,item.description);
-        const float bottom=105+ui.small->CalcTextSizeA(18,10000,0,wrapped.text.c_str()).y;
-        if(wrapped.longestWord>width || bottom>layout.boardY-4)
+        const auto wrapped=wrapRelicWords(ImGui::GetIO().FontDefault,22,width,item.description);
+        const float bottom=strip.bodyTop()+ImGui::GetIO().FontDefault->CalcTextSizeA(22,10000,0,wrapped.text.c_str()).y;
+        const std::string title=std::string(item.name)+" / "+bj::rarityName(item.rarity);
+        if(wrapped.longestWord>width || bottom>strip.bottom()-6 ||
+            ui.button->CalcTextSizeA(24,10000,0,title.c_str()).x>width)
             throw std::runtime_error(std::string("Equipment detail overflows: ")+item.name);
         maxBottom=std::max(maxBottom,bottom);
     }
+    if(strip.radius*2+12>strip.cell) throw std::runtime_error("Equipment chips overlap");
     std::cout<<"Equipment layout "<<static_cast<int>(display.x)<<'x'<<static_cast<int>(display.y)
              <<": 8 slots, detail bottom "<<maxBottom<<" / "<<layout.boardY<<'\n';
 }
@@ -960,7 +1021,9 @@ void relicTooltip(const bj::RelicInfo& item, const Interface& ui) {
     ImGui::TextColored(rarityColor(item.rarity), "%s / %s", item.name, bj::rarityName(item.rarity));
     ImGui::TextWrapped("%s", item.description);
     ImGui::PushFont(ui.small);
-    ImGui::Text("Buy: %d coins    Sell: %d coins", item.cost, item.cost / 2);
+    shopCoinText("Buy: "+std::to_string(item.cost),ui);
+    ImGui::SameLine(0,18);
+    shopCoinText("Sell: "+std::to_string(item.cost/2),ui);
     ImGui::PopFont();
     ImGui::PopTextWrapPos();
     ImGui::EndTooltip();
@@ -981,25 +1044,31 @@ void drawRelicStrip(const bj::Snapshot& state, const presentation::Presentation&
     } else {
         ImGui::SameLine();ImGui::TextColored(muted,"1-8 inspect  /  A activate  /  Esc close");
     }
-    const float cell=layout.contentWidth/8;
+    const auto strip=equipmentLayout(layout.contentWidth);
+    const float cell=strip.cell;
     bool pointerOnOccupiedSlot=false;
     for(int slot=0;slot<static_cast<int>(bj::maxEquipmentSlots);++slot) {
-        ImGui::PushID(slot);const float x=4+slot*cell,y=26;
+        ImGui::PushID(slot);
         const bool filled=slot<static_cast<int>(state.owned.size());
         const ImVec4 accent=filled?rarityColor(relicInfo(state.owned[static_cast<std::size_t>(slot)]).rarity):ImVec4(.35f,.31f,.29f,1);
-        const ImVec2 a{origin.x+x,origin.y+y},b{origin.x+x+cell-9,origin.y+y+47};
-        const ImVec2 center{(a.x+b.x)*.5f,a.y+23};
-        draw->AddRectFilled(a,b,IM_COL32(24,17,29,205),4);
-        draw->AddRect(a,b,ImGui::ColorConvertFloat4ToU32({accent.x,accent.y,accent.z,filled?.50f:.16f}),4);
+        const float x=(slot+.5f)*cell;
+        const ImVec2 center{origin.x+x,origin.y+strip.centerY};
         if(!filled) {
-            const std::string number=std::to_string(slot+1)+"  --";
-            draw->AddCircle(center,21,IM_COL32(142,128,116,45),32,1);
-            draw->AddText(ui.small,16,{a.x+8,a.y+15},IM_COL32(142,128,116,115),number.c_str());
+            const std::string number=std::to_string(slot+1);
+            draw->AddCircle(center,strip.radius-1,IM_COL32(160,143,118,40),64,1);
+            draw->AddCircle(center,strip.radius-5,IM_COL32(160,143,118,18),64,1);
+            const auto size=ui.small->CalcTextSizeA(18,1000,0,number.c_str());
+            draw->AddText(ui.small,18,{center.x-size.x*.5f,center.y-size.y*.5f},IM_COL32(160,143,118,82),number.c_str());
             ImGui::PopID();continue;
         }
         const auto id=state.owned[static_cast<std::size_t>(slot)];const auto status=bj::abilityStatus(game.state(),id);
-        ImGui::SetCursorPos({x,y});
-        const bool selectedSlot=ImGui::Selectable("##slot",session.selectedEquipment==slot,0,{cell-9,47});
+        ImGui::SetCursorPos({x-strip.radius-4,strip.centerY-strip.radius-4});
+        ImGui::PushStyleColor(ImGuiCol_Header,{0,0,0,0});
+        ImGui::PushStyleColor(ImGuiCol_HeaderHovered,{0,0,0,0});
+        ImGui::PushStyleColor(ImGuiCol_HeaderActive,{0,0,0,0});
+        ImGui::PushStyleColor(ImGuiCol_NavCursor,{0,0,0,0});
+        const bool selectedSlot=ImGui::Selectable("##slot",session.selectedEquipment==slot,0,{strip.radius*2+8,strip.radius*2+8});
+        ImGui::PopStyleColor(4);
         buttonSounds(selectedSlot,false);
         if(selectedSlot) {
             if(session.selectedEquipment==slot) session.clearEquipmentContext();
@@ -1010,19 +1079,28 @@ void drawRelicStrip(const bj::Snapshot& state, const presentation::Presentation&
         session.relicHover[slot]=approach(session.relicHover[slot],hovered||session.hoveredRelic==slot);
         if(hovered) {session.inspectedRelic=id;session.hoveredRelic=slot;}
         const bool reacting=session.relicReactionStep>0&&static_cast<std::size_t>(session.relicReactionStep)<=state.score.appliedEffects.size()&&state.score.appliedEffects[session.relicReactionStep-1].relic==id;
-        if(reacting) draw->AddRect(a,b,IM_COL32(245,207,120,220),4,0,2);
-        const bool focused=session.selectedEquipment==slot;
-        if(focused || hovered) draw->AddRect(a,b,ImGui::ColorConvertFloat4ToU32(accent),4,0,focused?1.5f:1.0f);
-        drawChip(draw,center,22,relicInfo(id),art);
+        const bool focused=session.selectedEquipment==slot||(ImGui::GetIO().NavVisible&&ImGui::IsItemFocused());
+        const ImVec2 lifted{center.x,center.y-session.relicHover[slot]*4};
+        draw->AddCircleFilled({center.x,center.y+3},strip.radius+2,IM_COL32(0,0,0,95),64);
+        if(focused||hovered||reacting) {
+            const float glow=reacting?.22f:focused?.13f:.08f;
+            draw->AddCircle(lifted,strip.radius+3,ImGui::ColorConvertFloat4ToU32({accent.x,accent.y,accent.z,glow}),64,6);
+            draw->AddCircle(lifted,strip.radius+2,reacting?IM_COL32(255,221,154,235):ImGui::ColorConvertFloat4ToU32(accent),64,focused||reacting?1.7f:1);
+        }
+        drawChip(draw,lifted,strip.radius,relicInfo(id),art);
         const std::string number=std::to_string(slot+1);
-        draw->AddText(ui.small,16,{a.x+7,a.y+15},ImGui::ColorConvertFloat4ToU32(accent),number.c_str());
+        const ImVec2 key{lifted.x-strip.radius+3,lifted.y+strip.radius-5};
+        draw->AddCircleFilled(key,10,IM_COL32(19,15,22,235),32);
+        const auto keySize=ui.small->CalcTextSizeA(16,1000,0,number.c_str());
+        draw->AddText(ui.small,16,{key.x-keySize.x*.5f,key.y-keySize.y*.5f},ImGui::ColorConvertFloat4ToU32(accent),number.c_str());
         if(bj::isActiveRelic(id)) {
             const std::string charge=std::to_string(status.remaining)+"/"+std::to_string(status.maximum);
             const auto color=ImGui::ColorConvertFloat4ToU32(status.usable?green:muted);
-            const ImVec2 badge{b.x-29,b.y-18};
-            draw->AddRectFilled(badge,{b.x-3,b.y-1},IM_COL32(24,17,29,245),4);
-            draw->AddRect(badge,{b.x-3,b.y-1},color,4);
-            draw->AddText(ui.small,14,{badge.x+4,badge.y},color,charge.c_str());
+            const ImVec2 badge{lifted.x+strip.radius-6,lifted.y+strip.radius-8};
+            draw->AddCircleFilled(badge,14,IM_COL32(24,17,29,245),32);
+            draw->AddCircle(badge,14,color,32,1);
+            const auto size=ui.small->CalcTextSizeA(14,1000,0,charge.c_str());
+            draw->AddText(ui.small,14,{badge.x-size.x*.5f,badge.y-size.y*.5f},color,charge.c_str());
         }
         ImGui::PopID();
     }
@@ -1030,31 +1108,32 @@ void drawRelicStrip(const bj::Snapshot& state, const presentation::Presentation&
     // Empty slots, header space, the sidebar and the rest of the table dismiss it.
     const bool hasDetail=session.hoveredRelic>=0||session.selectedEquipment>=0;
     const bool pointerOnDetail=hasDetail && state.cardChoices.empty() &&
-        ImGui::IsMouseHoveringRect({origin.x+4,origin.y+78},{origin.x+layout.contentWidth-5,origin.y+145});
+        ImGui::IsMouseHoveringRect({origin.x+4,origin.y+strip.detailTop},{origin.x+layout.contentWidth-5,origin.y+strip.bottom()});
     if(ImGui::IsMouseClicked(0) && !pointerOnOccupiedSlot && !pointerOnDetail && !session.physicalChipHovered)
         session.clearEquipmentContext();
     const int selected=session.hoveredRelic>=0?session.hoveredRelic:session.selectedEquipment;
     if(state.cardChoices.empty()&&selected>=0&&selected<static_cast<int>(state.owned.size())) {
         const auto& item=relicInfo(state.owned[static_cast<std::size_t>(selected)]);
         const auto status=bj::abilityStatus(game.state(),item.id);
-        draw->AddRectFilled({origin.x+4,origin.y+78},{origin.x+layout.contentWidth-5,origin.y+145},IM_COL32(26,19,31,242),5);
-        palace::panelFrame(draw,{origin.x+4,origin.y+78},{layout.contentWidth-9,67},false);
-        ImGui::SetCursorPos({14,80});ImGui::TextColored(rarityColor(item.rarity),"%s / %s",item.name,bj::rarityName(item.rarity));
-        const auto wrapped=wrapRelicWords(ui.small,18,layout.contentWidth-210,item.description);
-        draw->AddText(ui.small,18,{origin.x+14,origin.y+105},ImGui::GetColorU32(ImGuiCol_Text),wrapped.text.c_str());
+        draw->AddRectFilled({origin.x+4,origin.y+strip.detailTop},{origin.x+layout.contentWidth-5,origin.y+strip.bottom()},IM_COL32(24,19,29,235),6);
+        palace::panelFrame(draw,{origin.x+4,origin.y+strip.detailTop},{layout.contentWidth-9,strip.detailHeight},false);
+        const std::string title=std::string(item.name)+" / "+bj::rarityName(item.rarity);
+        draw->AddText(ui.button,24,{origin.x+16,origin.y+strip.detailTop+7},ImGui::GetColorU32(rarityColor(item.rarity)),title.c_str());
+        const auto wrapped=wrapRelicWords(ImGui::GetIO().FontDefault,22,layout.contentWidth-220,item.description);
+        draw->AddText(ImGui::GetIO().FontDefault,22,{origin.x+16,origin.y+strip.bodyTop()},ImGui::GetColorU32(ImGuiCol_Text),wrapped.text.c_str());
         if(bj::isActiveRelic(item.id)) {
-            ImGui::SetCursorPos({layout.contentWidth-184,80});
+            ImGui::SetCursorPos({layout.contentWidth-188,strip.detailTop+8});
             ImGui::BeginDisabled(commands.blocked||commands.used||!status.usable);
-            if(theatreButton("ACTIVATE / A",{170,28},{.19f,.28f,.24f,1})) {
+            if(theatreButton("ACTIVATE / A",{170,34},{.19f,.28f,.24f,1})) {
                 session.selectedEquipment=selected;
                 commands.apply([&]{return game.activate(item.id);},true);
             }
             ImGui::EndDisabled();
-            const auto reason=wrapRelicWords(ui.small,16,170,status.reason);
-            draw->AddText(ui.small,16,{origin.x+layout.contentWidth-184,origin.y+111},
+            const auto reason=wrapRelicWords(ui.small,18,170,status.reason);
+            draw->AddText(ui.small,18,{origin.x+layout.contentWidth-188,origin.y+strip.detailTop+50},
                 ImGui::GetColorU32(status.usable?green:muted),reason.text.c_str());
         } else {
-            ImGui::SetCursorPos({layout.contentWidth-160,91});ImGui::TextColored(muted,"PASSIVE EFFECT");
+            ImGui::SetCursorPos({layout.contentWidth-160,strip.detailTop+16});ImGui::TextColored(muted,"PASSIVE EFFECT");
         }
     }
     ImGui::PopFont();ImGui::End();ImGui::PopStyleVar();(void)timeline;
@@ -1178,12 +1257,18 @@ void drawRarityFrame(ImDrawList* draw, ImVec2 origin, ImVec2 size, bj::Rarity ra
     const bool legendary=rarity==bj::Rarity::Legendary;
     const bool rare=rarity==bj::Rarity::Rare;
     const auto accent=rarityColor(rarity);
-    const ImU32 ink=ImGui::ColorConvertFloat4ToU32(accent);
+    const ImU32 ink=ImGui::GetColorU32(accent);
     const ImVec2 end{origin.x+size.x-2,origin.y+size.y-2};
+    for(int layer=0;layer<3;++layer) {
+        const float inset=3.5f+layer*2;
+        draw->AddRect({origin.x+inset,origin.y+inset},{end.x-inset+2,end.y-inset+2},
+            ImGui::GetColorU32({accent.x,accent.y,accent.z,(legendary?.07f:rare?.045f:.022f)/(layer+1)}),
+            5,0,3);
+    }
     draw->AddRect({origin.x+2,origin.y+2},end,ink,5,0,legendary?2.5f:rare?1.5f:1.0f);
     if(!legendary&&!rare) return;
     if(legendary) draw->AddRect({origin.x+6,origin.y+6},{end.x-4,end.y-4},
-                              IM_COL32(207,150,62,100),3,0,1);
+                              ImGui::GetColorU32({207/255.0f,150/255.0f,62/255.0f,.39f}),3,0,1);
     for(float side : {0.0f,1.0f}) {
         const float x=origin.x+8+side*(size.x-16),dir=side? -1.0f:1.0f;
         for(float bottom : {0.0f,1.0f}) {
@@ -1195,21 +1280,44 @@ void drawRarityFrame(ImDrawList* draw, ImVec2 origin, ImVec2 size, bj::Rarity ra
     if(rare) {
         const float t=animate?static_cast<float>(ImGui::GetTime()):0;
         const float x=origin.x+20+(size.x-40)*(.5f+.5f*std::sin(t*.32f));
-        draw->AddRect({origin.x+4,origin.y+4},{end.x-2,end.y-2},IM_COL32(100,168,224,35),4,0,3);
-        draw->AddLine({x-8,origin.y+3},{x+8,origin.y+3},IM_COL32(180,221,250,125),1.5f);
+        draw->AddRect({origin.x+4,origin.y+4},{end.x-2,end.y-2},ImGui::GetColorU32({.39f,.66f,.88f,.14f}),4,0,3);
+        draw->AddLine({x-14,origin.y+3},{x+14,origin.y+3},ImGui::GetColorU32({.71f,.87f,.98f,.48f}),1.5f);
     }
     if(legendary) {
         const float t=animate?static_cast<float>(ImGui::GetTime()):0;
         const float x=origin.x+12+(size.x-24)*(.5f+.5f*std::sin(t*.45f));
-        draw->AddLine({x-12,origin.y+3},{x+12,origin.y+3},IM_COL32(255,235,166,210),2);
+        draw->AddLine({x-18,origin.y+3},{x+18,origin.y+3},ImGui::GetColorU32({1,.92f,.65f,.76f}),2);
         for(int i=0;i<3;++i) {
             const float px=origin.x+20+(size.x-40)*(i+1)/4;
             const float alpha=.45f+.15f*std::sin(t*.8f+i*2);
-            const auto glow=ImGui::ColorConvertFloat4ToU32({1,.83f,.43f,alpha});
+            const auto glow=ImGui::GetColorU32({1,.83f,.43f,alpha});
             draw->AddLine({px-3,end.y-4},{px+3,end.y-4},glow,1);
             draw->AddLine({px,end.y-7},{px,end.y-1},glow,1);
         }
     }
+}
+
+float shopRelicHover(bool hovered, bool animate) {
+    auto* storage=ImGui::GetStateStorage();
+    const auto id=ImGui::GetID("shop-relic-hover"),frameId=ImGui::GetID("shop-relic-frame");
+    const bool continuous=storage->GetInt(frameId,-2)==ImGui::GetFrameCount()-1;
+    const float value=animate?approach(continuous?storage->GetFloat(id):0,hovered):0;
+    storage->SetFloat(id,value);storage->SetInt(frameId,ImGui::GetFrameCount());
+    return value;
+}
+
+void drawShopRelic(ImDrawList* draw, ImVec2 center, float radius, const bj::RelicInfo& item,
+                   const ArtAssets& art, bool animate, float hover) {
+    center.y-=std::min(3.0f,radius*.08f)*hover;
+    const auto accent=rarityColor(item.rarity);
+    const float glow=item.rarity==bj::Rarity::Legendary?.10f:item.rarity==bj::Rarity::Rare?.07f:.035f;
+    for(int layer=3;layer>0;--layer)
+        draw->AddCircle(center,radius+layer*1.8f,
+            ImGui::GetColorU32({accent.x,accent.y,accent.z,(glow+hover*.08f)/layer}),64,2);
+    drawChip(draw,center,radius,item,art);
+    const float phase=animate?static_cast<float>(ImGui::GetTime())*.24f+static_cast<int>(item.id)*.41f:.7f;
+    draw->PathArcTo(center,radius*.93f,phase,phase+.52f,12);
+    draw->PathStroke(ImGui::GetColorU32({1,.94f,.79f,.14f+hover*.14f}),0,1.4f);
 }
 
 void drawShop(bj::Game& game, Commands& commands, Session& session, const Interface& ui, const ArtAssets& art, bool animate) {
@@ -1219,7 +1327,13 @@ void drawShop(bj::Game& game, Commands& commands, Session& session, const Interf
     ImGui::GetBackgroundDrawList()->AddRectFilled({0,0},display,IM_COL32(8,9,18,200));
     beginPanel("##shop",{(display.x-width)*.5f,(display.y-height)*.5f},{width,height});
     ImGui::PushFont(ui.heading);ImGui::TextColored(cream,"The Curiosity Cabinet");ImGui::PopFont();
-    ImGui::SameLine(width-205);ImGui::TextColored(gold,"%d COINS",state.coins);
+    const std::string balance=std::to_string(state.coins);
+    const float balanceWidth=ui.number->CalcTextSizeA(36,10000,0,balance.c_str()).x+48;
+    ImGui::SameLine(width-24-balanceWidth);
+    const auto balanceOrigin=ImGui::GetCursorScreenPos();
+    ImGui::Dummy({balanceWidth,36});
+    drawCoinIcon(ImGui::GetWindowDrawList(),{balanceOrigin.x+23,balanceOrigin.y+18},16,ui);
+    ImGui::GetWindowDrawList()->AddText(ui.number,36,{balanceOrigin.x+48,balanceOrigin.y},ImGui::GetColorU32(gold),balance.c_str());
     ImGui::PushFont(ui.small);
     ImGui::TextColored(muted,"%d / %d EQUIPPED   /   Select an equipped relic to trade when full.",static_cast<int>(state.owned.size()),static_cast<int>(bj::maxEquipmentSlots));
     ImGui::PopFont();ImGui::Separator();
@@ -1229,14 +1343,14 @@ void drawShop(bj::Game& game, Commands& commands, Session& session, const Interf
     const float cardWidth=(width-54)*.5f;
     for(std::size_t i=0;i<state.offers.size();++i) {
         const auto& item=relicInfo(state.offers[i]);
-        const auto accent=rarityColor(item.rarity);
         ImGui::PushID(static_cast<int>(item.id));ImGui::SetCursorPos({20+static_cast<float>(i)*(cardWidth+14),offerY});
         ImGui::PushStyleColor(ImGuiCol_ChildBg,item.rarity==bj::Rarity::Legendary?ImVec4(.16f,.125f,.07f,1):ImVec4(.085f,.105f,.12f,1));
         ImGui::BeginChild("offer",{cardWidth,offerHeight},ImGuiChildFlags_Borders,ImGuiWindowFlags_NoScrollbar);
         const auto origin=ImGui::GetWindowPos();
         drawRarityFrame(ImGui::GetWindowDrawList(),origin,{cardWidth,offerHeight},item.rarity,animate);
         const float radius=height<700?55.0f:66.0f;
-        drawChip(ImGui::GetWindowDrawList(),{origin.x+radius+17,origin.y+radius+18},radius,item,art);
+        const float hover=shopRelicHover(ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows),animate);
+        drawShopRelic(ImGui::GetWindowDrawList(),{origin.x+radius+17,origin.y+radius+18},radius,item,art,animate,hover);
         const float textX=radius*2+34;
         ImGui::SetCursorPos({textX,14});ImGui::PushFont(ui.button);ImGui::PushTextWrapPos(cardWidth-14);
         ImGui::TextColored(cream,"%s",item.name);ImGui::PopTextWrapPos();ImGui::PopFont();
@@ -1248,11 +1362,14 @@ void drawShop(bj::Game& game, Commands& commands, Session& session, const Interf
         const int refund=selected?relicInfo(state.owned[static_cast<std::size_t>(session.shopReplacement)]).cost/2:0;
         const int net=item.cost-refund;
         const bool affordable=state.coins+refund>=item.cost;
-        std::string label=owned?"EQUIPPED":purchased?"SOLD THIS VISIT":full&&!selected?"SELECT A RELIC TO TRADE":
-            !affordable?"NEED "+std::to_string(net)+" COINS":selected?(net<0?"TRADE / RECEIVE "+std::to_string(-net):"TRADE / "+std::to_string(net))+" COINS":"BUY / "+std::to_string(item.cost)+" COINS";
+        const bool priced=!owned&&!purchased&&(!full||selected);
+        const std::string caption=!affordable?"NEED":selected?(net<0?"TRADE / RECEIVE":"TRADE /"):"BUY /";
+        const std::string label=owned?"EQUIPPED":purchased?"SOLD THIS VISIT":"SELECT A RELIC TO TRADE";
         ImGui::SetCursorPos({12,offerHeight-57});ImGui::PushFont(ui.button);
         ImGui::BeginDisabled(commands.blocked||commands.used||owned||purchased||!affordable||(full&&!selected));
-        if(theatreButton(label.c_str(),{cardWidth-24,43},{.23f,.18f,.26f,1})) {
+        const bool purchase=priced?shopCoinButton(caption,net<0?-net:net,{cardWidth-24,43},{.23f,.18f,.26f,1},ui,"purchase"):
+            theatreButton(label.c_str(),{cardWidth-24,43},{.23f,.18f,.26f,1});
+        if(purchase) {
             commands.apply([&]{return selected?game.replace(state.owned[static_cast<std::size_t>(session.shopReplacement)],item.id):game.buy(item.id);});
             if(commands.used) {
                 playSound(audio::Sfx::ChipsBet); // Coins are paid across the table.
@@ -1265,11 +1382,15 @@ void drawShop(bj::Game& game, Commands& commands, Session& session, const Interf
            ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)&&ImGui::IsMouseClicked(0))
             playSound(audio::Sfx::UiError);
         ImGui::PopFont();ImGui::EndChild();ImGui::PopStyleColor();ImGui::PopID();
-        (void)accent;
     }
     const float inventoryY=offerY+offerHeight+29,cellWidth=(width-76)/4,cellHeight=94;
     ImGui::SetCursorPos({20,inventoryY-24});ImGui::PushFont(ui.small);
-    ImGui::TextColored(gold,"YOUR RELICS   /   Trade includes half-price sale credit");ImGui::PopFont();
+    ImGui::TextColored(gold,"YOUR RELICS   /   Trade includes half-price sale credit");
+    if(full&&session.shopReplacement>=0) {
+        ImGui::SameLine(0,20);
+        shopCoinText("CREDIT +"+std::to_string(relicInfo(state.owned[static_cast<std::size_t>(session.shopReplacement)]).cost/2),ui);
+    }
+    ImGui::PopFont();
     for(int i=0;i<bj::maxEquipmentSlots;++i) {
         ImGui::PushID(100+i);
         const ImVec2 start{20+(i%4)*(cellWidth+12),inventoryY+(i/4)*(cellHeight+8)};
@@ -1282,7 +1403,6 @@ void drawShop(bj::Game& game, Commands& commands, Session& session, const Interf
             ImGui::PopID();continue;
         }
         const auto& item=relicInfo(state.owned[static_cast<std::size_t>(i)]);
-        drawChip(draw,{origin.x+29,origin.y+29},20,item,art);
         const float textWidth=ui.small->CalcTextSizeA(18,1000,0,item.name).x;
         draw->AddText(ui.small,std::min(18.0f,18*(cellWidth-64)/textWidth),{origin.x+57,origin.y+10},ImGui::ColorConvertFloat4ToU32(cream),item.name);
         draw->AddText(ui.small,14,{origin.x+57,origin.y+32},ImGui::ColorConvertFloat4ToU32(rarityColor(item.rarity)),bj::rarityName(item.rarity));
@@ -1290,12 +1410,14 @@ void drawShop(bj::Game& game, Commands& commands, Session& session, const Interf
         const bool selectReplacement=ImGui::InvisibleButton("select",{cellWidth-12,49});
         buttonSounds(selectReplacement,false);
         if(selectReplacement) session.shopReplacement=selected?-1:i;
+        const float hover=shopRelicHover(ImGui::IsItemHovered()||selected,animate);
+        drawShopRelic(draw,{origin.x+29,origin.y+29},20,item,art,animate,hover);
         if(ImGui::IsItemHovered()) relicTooltip(item,ui);
         ImGui::SetCursorPos({start.x+7,start.y+59});ImGui::PushFont(ui.small);
         ImGui::BeginDisabled(commands.blocked||commands.used);
         if(theatreButton(selected?"SELECTED":"TRADE",{(cellWidth-22)*.5f,27},{.24f,.22f,.20f,1})) session.shopReplacement=selected?-1:i;
-        ImGui::SameLine();const std::string sell="SELL / "+std::to_string(item.cost/2);
-        if(theatreButton(sell.c_str(),{(cellWidth-22)*.5f,27},{.29f,.18f,.17f,1})) {
+        ImGui::SameLine();
+        if(shopCoinButton("SELL /",item.cost/2,{(cellWidth-22)*.5f,27},{.29f,.18f,.17f,1},ui,"sell")) {
             commands.apply([&]{return game.sell(item.id);});
             if(commands.used) {
                 playSound(audio::Sfx::ChipsWin); // Half the price comes back as coins.
@@ -1705,16 +1827,17 @@ void drawCardChoices(bj::Game& game,Commands& commands,const Interface& ui,const
     const auto state=game.state();
     if(session.menu||session.settings||session.rules||session.transitioning()||state.cardChoices.empty()) return;
     const auto display=ImGui::GetIO().DisplaySize;const auto layout=tableLayout(display);
+    const auto strip=equipmentLayout(layout.contentWidth);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,{12,6});
-    beginPanel("##card-choice",{layout.contentX+4,78},{layout.contentWidth-9,67});
-    ImGui::PushFont(ui.small);ImGui::TextColored(gold,"FORKED PATH / CHOOSE ONE CARD");
+    beginPanel("##card-choice",{layout.contentX+4,strip.detailTop},{layout.contentWidth-9,strip.detailHeight});
+    ImGui::PushFont(ui.button);ImGui::TextColored(gold,"FORKED PATH / CHOOSE ONE CARD");
     const char* suits[]={"Clubs","Diamonds","Hearts","Spades"};
     for(std::size_t i=0;i<state.cardChoices.size();++i) {
         if(i) ImGui::SameLine();const auto card=state.cardChoices[i];
         const std::string rank=card.rank==1?"Ace":card.rank==11?"Jack":card.rank==12?"Queen":card.rank==13?"King":std::to_string(card.rank);
         const std::string label=rank+" of "+suits[static_cast<int>(card.suit)]+(i==0?" / Q":" / E");
         ImGui::BeginDisabled(commands.blocked||commands.used);
-        if(theatreButton(label.c_str(),{(layout.contentWidth-42)*.5f,28},{.19f,.26f,.24f,1})) commands.apply([&]{return game.chooseCard(i);},true);
+        if(theatreButton(label.c_str(),{(layout.contentWidth-42)*.5f,42},{.19f,.26f,.24f,1})) commands.apply([&]{return game.chooseCard(i);},true);
         ImGui::EndDisabled();
     }
     ImGui::PopFont();ImGui::End();ImGui::PopStyleVar();
@@ -2219,7 +2342,7 @@ int main(int argc, char** argv) {
                     if(frame==146) io.AddMouseButtonEvent(0,false);
                 }
                 if(frame>340&&!session.menu&&!game.state().owned.empty()&&game.state().phase!=bj::Phase::Shop&&game.state().phase!=bj::Phase::RunLost) {
-                    io.AddMousePosEvent(table.contentX+table.contentWidth/16,49);
+                    io.AddMousePosEvent(table.contentX+table.contentWidth/16,equipmentLayout(table.contentWidth).centerY);
                 }
                 if(frame>=160 && frame%20==0 && !session.menu && !timeline.busy() &&
                     game.state().phase!=bj::Phase::Shop && game.state().phase!=bj::Phase::RunLost)
@@ -2241,7 +2364,7 @@ int main(int argc, char** argv) {
                     }
                     if(options.abilityMouse&&smokeKey==ImGuiKey_A) {
                         const auto layout=tableLayout(io.DisplaySize);
-                        io.AddMousePosEvent(layout.contentX+layout.contentWidth-99,87);
+                        io.AddMousePosEvent(layout.contentX+layout.contentWidth-103,equipmentLayout(layout.contentWidth).detailTop+25);
                         io.AddMouseButtonEvent(0,true);smokeMouseDown=true;smokeKey=ImGuiKey_None;
                     } else if(smokeKey!=ImGuiKey_None) io.AddKeyEvent(smokeKey,true);
                 }
@@ -2265,7 +2388,7 @@ int main(int argc, char** argv) {
                     const int iconFrame=190+static_cast<int>(i)*6;
                     if(frame==iconFrame||frame==iconFrame+1) {
                         const auto layout=tableLayout(io.DisplaySize);
-                        io.AddMousePosEvent(layout.contentX+4+(static_cast<float>(i)+.5f)*layout.contentWidth/8-4.5f,49);
+                        io.AddMousePosEvent(layout.contentX+(static_cast<float>(i)+.5f)*layout.contentWidth/8,equipmentLayout(layout.contentWidth).centerY);
                         io.AddMouseButtonEvent(0,frame==iconFrame);
                     }
                     const int keyFrame=90+static_cast<int>(i)*8;

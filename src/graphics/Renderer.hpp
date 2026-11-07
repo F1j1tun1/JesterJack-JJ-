@@ -74,6 +74,10 @@ struct RenderSettings {
     float pitch = 32.0f;
     float distance = 9.1f;
     float lightIntensity = 1.2f;
+    // World-space offset from the scene's default main light; zero restores it.
+    float lightX = 0.0f;
+    float lightY = 0.0f;
+    float lightZ = 0.0f;
     bool textures = true;
     bool lighting = true;
     bool animate = true;

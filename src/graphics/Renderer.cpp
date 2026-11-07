@@ -93,6 +93,7 @@ struct Mesh {
     GLuint vbo = 0;
     GLuint ebo = 0;
     GLsizei indexCount = 0;
+    bool twoSided = false;
 
     Mesh() = default;
     Mesh(const Mesh&) = delete;
@@ -105,6 +106,7 @@ struct Mesh {
             vbo = std::exchange(other.vbo, 0);
             ebo = std::exchange(other.ebo, 0);
             indexCount = std::exchange(other.indexCount, 0);
+            twoSided = other.twoSided;
         }
         return *this;
     }
@@ -125,9 +127,33 @@ struct Mesh {
     }
 };
 
+// Mesh generators share position/normal/UV vertices. Some parameterizations (and
+// reverse-normal cloth surfaces) had the opposite index winding while culling
+// was disabled. Orient each triangle toward its supplied normals once at upload.
+std::vector<std::uint32_t> outwardIndices(const std::vector<float>& vertices,
+                                        const std::vector<std::uint32_t>& indices) {
+    auto oriented = indices;
+    const auto position = [&](std::uint32_t index) {
+        const auto at = static_cast<std::size_t>(index) * 8;
+        return glm::vec3(vertices[at], vertices[at + 1], vertices[at + 2]);
+    };
+    const auto normal = [&](std::uint32_t index) {
+        const auto at = static_cast<std::size_t>(index) * 8 + 3;
+        return glm::vec3(vertices[at], vertices[at + 1], vertices[at + 2]);
+    };
+    for (std::size_t triangle = 0; triangle + 2 < oriented.size(); triangle += 3) {
+        const auto a = oriented[triangle], b = oriented[triangle + 1], c = oriented[triangle + 2];
+        const auto face = glm::cross(position(b) - position(a), position(c) - position(a));
+        if (glm::dot(face, normal(a) + normal(b) + normal(c)) < 0.0f)
+            std::swap(oriented[triangle + 1], oriented[triangle + 2]);
+    }
+    return oriented;
+}
+
 Mesh makeMesh(const std::vector<float>& vertices,
               const std::vector<std::uint32_t>& indices) {
     Mesh mesh;
+    const auto oriented = outwardIndices(vertices, indices);
     mesh.indexCount = static_cast<GLsizei>(indices.size());
     glGenVertexArrays(1, &mesh.vao);
     glGenBuffers(1, &mesh.vbo);
@@ -139,7 +165,7 @@ Mesh makeMesh(const std::vector<float>& vertices,
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, mesh.ebo);
     glBufferData(GL_ELEMENT_ARRAY_BUFFER,
                  static_cast<GLsizeiptr>(indices.size() * sizeof(std::uint32_t)),
-                 indices.data(), GL_STATIC_DRAW);
+                 oriented.data(), GL_STATIC_DRAW);
     constexpr GLsizei stride = 8 * sizeof(float);
     glEnableVertexAttribArray(0);
     glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, nullptr);
@@ -1103,10 +1129,16 @@ struct Renderer::Impl {
             const float square=1.0f/std::max(std::abs(c),std::abs(s));
             const float taper=1.0f-v*.30f;
             return glm::vec3(c*square*taper,v,s*square*taper);
-        }));
+        }, true)); // Exterior roof normals point away from the building.
         sky = makeMesh({-1, -1, 0, 0, 0, 1, 0, 0,
                          3, -1, 0, 0, 0, 1, 2, 0,
                         -1,  3, 0, 0, 0, 1, 0, 2}, {0, 1, 2});
+        // These are intentionally zero-thickness sheets or open thin shells,
+        // visible from either side. Opaque solid meshes retain back-face culling.
+        // Bent sleeve folds can locally reverse their orientation while posing.
+        for (Mesh* sheet : {&plane, &ring, &arch, &mask, &ruff, &curtain,
+                            &leadMask, &leadLace, &leadJabot, &leadSleeve, &casinoCanopy,
+                            &headlightPatch, &lightHalo}) sheet->twoSided = true;
         skyResolution = glGetUniformLocation(skyProgram.id, "uResolution");
         white = textures.upload(Bitmap(1, 1, {255, 255, 255}));
         felt = textures.upload(feltBitmap(), true);
@@ -1165,7 +1197,14 @@ struct Renderer::Impl {
         glUniform1i(u.material, material);
         glUniform1i(u.useTexture, texturesEnabled && texture != 0 ? GL_TRUE : GL_FALSE);
         glBindTexture(GL_TEXTURE_2D, texture ? texture : white);
+        // Mirroring a model reverses its winding without changing which side is
+        // outside. Restore the default immediately after this one draw.
+        const bool mirrored = glm::determinant(glm::mat3(world)) < 0.0f;
+        if (mirrored) glFrontFace(GL_CW);
+        if (mesh.twoSided) glDisable(GL_CULL_FACE);
         mesh.draw();
+        if (mesh.twoSided) glEnable(GL_CULL_FACE);
+        if (mirrored) glFrontFace(GL_CCW);
     }
 
     GLuint cardBack() const {
@@ -1571,7 +1610,9 @@ struct Renderer::Impl {
         glDepthFunc(GL_LESS);
         glDepthMask(GL_TRUE);
         glDisable(GL_BLEND);
-        glDisable(GL_CULL_FACE);
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_BACK);
+        glFrontFace(GL_CCW);
         glDisable(GL_SCISSOR_TEST);
         if (scene.menu) glClearColor(.026f, .014f, .050f, 1.0f);
         else glClearColor(.003f, .005f, .008f, 1);
@@ -1589,8 +1630,10 @@ struct Renderer::Impl {
         glUniformMatrix4fv(u.view, 1, GL_FALSE, glm::value_ptr(view));
         glUniformMatrix4fv(u.projection, 1, GL_FALSE, glm::value_ptr(projection));
         glUniform3fv(u.camera, 1, glm::value_ptr(eye));
-        if(scene.menu) glUniform3f(u.light,-5.0f,7.0f,4.0f);
-        else glUniform3f(u.light,0,5.4f,-1.6f); // The visible pendant's luminous underside.
+        const auto light = (scene.menu ? glm::vec3(-5.0f, 7.0f, 4.0f)
+                                      : glm::vec3(0, 5.4f, -1.6f))
+            + glm::vec3(settings.lightX, settings.lightY, settings.lightZ);
+        glUniform3fv(u.light, 1, glm::value_ptr(light));
         if (scene.menu) glUniform3f(u.fogColor, .10f, .07f, .13f);
         else glUniform3f(u.fogColor, .003f, .005f, .008f);
         glUniform1f(u.intensity, std::clamp(settings.lightIntensity, minLight, maxLight) * (scene.menu ? .8f : 1.0f));
@@ -1649,6 +1692,7 @@ struct Renderer::Impl {
 
         drawHand(scene.dealer, -1.12f, scene.time, settings.animate, true);
         drawHand(scene.player, 1.12f, scene.time + .7f, settings.animate, false);
+        drawBandNotes(scene, settings.animate);
         drawRoomDust(scene.time, settings.animate);
         drawEffects(scene);
 

@@ -185,6 +185,78 @@
         roomMainLegs();
     }
 
+    void drawBandNotes(const Scene& scene, bool animate) {
+        if (!animate || !scene.band.visible || !scene.band.playing || !std::isfinite(scene.band.beats)) return;
+
+        // Three staggered phrases leave only two or three small glyphs above the ensemble.
+        // These stay in stage space, so foreground people, cards and UI naturally cover them.
+        // The same beat clock as the musicians also freezes when the presentation is paused.
+        const double beat = scene.band.beats / (scene.band.bpm > band::maxPulseBpm ? 2.0 : 1.0);
+        const glm::mat4 stage = glm::translate(glm::mat4(1), {0, .975f, -38.8f})
+            * glm::scale(glm::mat4(1), glm::vec3(1.7f));
+        const std::array<glm::vec3, 3> origins{{{-3.35f, 2.25f, -.55f},
+                                             {-.68f, 2.30f, .60f},
+                                             {2.40f, 2.35f, .05f}}};
+        struct Note { glm::vec3 position; float age, opacity, distance; int kind; };
+        std::array<Note, 3> notes{};
+        std::size_t count = 0;
+        const float energy = std::clamp(scene.band.mid * .6f + scene.band.high * .4f, 0.0f, 1.0f);
+        for (int i = 0; i < 3; ++i) {
+            double phase = std::fmod(beat - static_cast<double>(i) * 4.0, 12.0);
+            if (phase < 0) phase += 12.0;
+            if (phase >= 10.0) continue;
+            const float age = static_cast<float>(phase) / 10.0f;
+            const float fade = glm::smoothstep(0.0f, .16f, age)
+                * (1.0f - glm::smoothstep(.68f, 1.0f, age));
+            if (fade < .005f) continue;
+            const float sway = std::sin(age * pi * 1.4f + static_cast<float>(i) * 1.7f);
+            const glm::vec3 local = origins[static_cast<std::size_t>(i)]
+                + glm::vec3(sway * .13f, age * .94f, -.10f * age);
+            const glm::vec3 position = glm::vec3(stage * glm::vec4(local, 1));
+            const glm::vec3 delta = position - activeCamera;
+            notes[count++] = {position, age, fade * (.38f + .10f * energy), glm::dot(delta, delta), i};
+        }
+        std::sort(notes.begin(), notes.begin() + count,
+                  [](const Note& a, const Note& b) { return a.distance > b.distance; });
+
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        glDepthMask(GL_FALSE);
+        for (std::size_t i = 0; i < count; ++i) {
+            const auto& note = notes[i];
+            // Face the audience horizontally while retaining their physical height and depth.
+            const auto toAudience = activeCamera - note.position;
+            glm::mat4 glyph = transform(note.position, glm::vec3(1.7f),
+                                       std::atan2(toAudience.x, toAudience.z));
+            glyph = glm::rotate(glyph, -.12f + .08f * std::sin(note.age * pi * 2 + note.kind),
+                                glm::vec3(0, 0, 1));
+            const glm::vec3 color = note.kind == 1 ? glm::vec3(.62f, .43f, .67f)
+                                                   : glm::vec3(.83f, .64f, .32f);
+            const auto stroke = [&](glm::vec3 center, glm::vec3 size, float angle = 0.0f) {
+                auto model = glm::translate(glyph, center);
+                model = glm::rotate(model, angle, glm::vec3(0, 0, 1));
+                draw(cube, glm::scale(model, size), color, 0, glm::vec2(1), .08f, 24, .18f, note.opacity);
+            };
+            const auto head = [&](float x, float y) {
+                auto model = glm::translate(glyph, {x, y, 0});
+                model = glm::rotate(model, .30f, glm::vec3(0, 0, 1));
+                draw(sphere, glm::scale(model, {.085f, .055f, .018f}), color,
+                     0, glm::vec2(1), .08f, 24, .18f, note.opacity);
+                stroke({x + .065f, y + .19f, 0}, {.025f, .38f, .026f});
+            };
+            head(0, 0);
+            if (note.kind == 2) {
+                head(.25f, .045f);
+                stroke({.19f, .3875f, 0}, {.28f, .045f, .028f}, .178f);
+            } else if (note.kind == 0) {
+                stroke({.12f, .34f, 0}, {.15f, .040f, .028f}, -.55f);
+                stroke({.18f, .28f, 0}, {.085f, .030f, .026f}, -1.05f);
+            }
+        }
+        glDepthMask(GL_TRUE);
+        glDisable(GL_BLEND);
+    }
+
     void drawRoomDust(float time, bool animate) {
         const float t = animate ? time : 0;
         struct Grain { glm::vec3 position; float radius, opacity, distance; };

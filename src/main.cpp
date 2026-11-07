@@ -64,6 +64,7 @@ constexpr ImGuiWindowFlags panelFlags = ImGuiWindowFlags_NoDecoration |
 // interactive loop only, so previews, screenshots and tests stay silent.
 audio::Engine* soundOut = nullptr;
 audio::Sfx pendingUiSound = audio::Sfx::Count;
+float effectTime = 0.0f; // Shared scene clock; hover feedback remains interactive during pause.
 int uiSoundPriority(audio::Sfx sound) {
     switch (sound) {
         case audio::Sfx::UiError: return 4;
@@ -159,6 +160,9 @@ struct Options {
     bool cameraOverride = false;
     float light = 1.2f;
     bool lightSmoke = false;
+    bool controlsSmoke = false;
+    bool benchmark = false;
+    bool lightingOff = false;
     bool audioSmoke = false;
     std::filesystem::path audioSettings;
     bool entrancePreview = false;
@@ -247,6 +251,9 @@ Options parseOptions(int argc, char** argv) {
             options.stopOwned=std::stoi(value());
             if(options.stopOwned<0||options.stopOwned>bj::maxEquipmentSlots) throw std::runtime_error("--stop-owned must be 0..8");
         } else if(arg=="--light-smoke") options.lightSmoke=true;
+        else if(arg=="--controls-smoke") options.controlsSmoke=true;
+        else if(arg=="--benchmark") options.benchmark=true;
+        else if(arg=="--lighting-off") options.lightingOff=true;
         else if(arg=="--audio-smoke") options.audioSmoke=true;
         else if(arg=="--audio-settings") options.audioSettings=value();
         else if (arg == "--screenshot") options.screenshot = value();
@@ -273,6 +280,9 @@ Options parseOptions(int argc, char** argv) {
                 "  --camera Y,P,D    Diagnostic orbit: yaw,pitch,distance\n"
                 "  --light VALUE     Lamp intensity (.55..2.5)\n"
                 "  --light-smoke     Exercise live light slider at three values\n"
+                "  --controls-smoke Verify help, pause, lighting and light movement\n"
+                "  --benchmark       Measure 600 frames at 1280x720 after warm-up\n"
+                "  --lighting-off    Start with lighting disabled for comparison\n"
                 "  --audio-smoke     Exercise the two volume sliders\n"
                 "  --audio-settings FILE Use a separate audio preferences file\n"
                 "  --replay FILE     Replay verified public game commands for diagnostics\n"
@@ -290,6 +300,14 @@ Options parseOptions(int argc, char** argv) {
                 "  --smoke           Hidden integration run, including menu and resize\n";
             std::exit(0);
         } else throw std::runtime_error("Unknown option: " + arg);
+    }
+    if (options.benchmark) {
+        options.demo = true;
+        options.width = 1280;
+        options.height = 720;
+        options.frames = 660;
+        options.seed = 42;
+        options.fixedSeed = true;
     }
     if (!options.fixedSeed) options.seed = options.smoke ? 42 : freshSeed();
     if (!options.screenshot.empty() && options.frames == 0) options.frames = 3;
@@ -450,6 +468,9 @@ struct ArtAssets {
                 std::cerr<<"Expansion artwork fallback: "<<error.what()<<'\n';
             }
         }
+        else {
+            std::cerr << "Expansion artwork missing: " << extra.string() << "; using engraved fallback chips.\n";
+        }
     }
     const gfx::ArtTexture& deck(bj::StartDeck choice) const {
         return choice == bj::StartDeck::SecondLife ? life : choice == bj::StartDeck::Rich ? coins : hands;
@@ -461,6 +482,7 @@ struct Session {
     ImVec2 volumeMin[2]{},volumeMax[2]{};
     presentation::ScoreHistory history;
     bool menu = true;
+    bool controlsTab = false;
     bool collection = false;
     bool deckSelection = false;
     int collectionFilter = 0;
@@ -1278,13 +1300,13 @@ void drawRarityFrame(ImDrawList* draw, ImVec2 origin, ImVec2 size, bj::Rarity ra
         }
     }
     if(rare) {
-        const float t=animate?static_cast<float>(ImGui::GetTime()):0;
+        const float t=animate?effectTime:0;
         const float x=origin.x+20+(size.x-40)*(.5f+.5f*std::sin(t*.32f));
         draw->AddRect({origin.x+4,origin.y+4},{end.x-2,end.y-2},ImGui::GetColorU32({.39f,.66f,.88f,.14f}),4,0,3);
         draw->AddLine({x-14,origin.y+3},{x+14,origin.y+3},ImGui::GetColorU32({.71f,.87f,.98f,.48f}),1.5f);
     }
     if(legendary) {
-        const float t=animate?static_cast<float>(ImGui::GetTime()):0;
+        const float t=animate?effectTime:0;
         const float x=origin.x+12+(size.x-24)*(.5f+.5f*std::sin(t*.45f));
         draw->AddLine({x-18,origin.y+3},{x+18,origin.y+3},ImGui::GetColorU32({1,.92f,.65f,.76f}),2);
         for(int i=0;i<3;++i) {
@@ -1315,7 +1337,7 @@ void drawShopRelic(ImDrawList* draw, ImVec2 center, float radius, const bj::Reli
         draw->AddCircle(center,radius+layer*1.8f,
             ImGui::GetColorU32({accent.x,accent.y,accent.z,(glow+hover*.08f)/layer}),64,2);
     drawChip(draw,center,radius,item,art);
-    const float phase=animate?static_cast<float>(ImGui::GetTime())*.24f+static_cast<int>(item.id)*.41f:.7f;
+    const float phase=animate?effectTime*.24f+static_cast<int>(item.id)*.41f:.7f;
     draw->PathArcTo(center,radius*.93f,phase,phase+.52f,12);
     draw->PathStroke(ImGui::GetColorU32({1,.94f,.79f,.14f+hover*.14f}),0,1.4f);
 }
@@ -1668,18 +1690,43 @@ void drawTable(bj::Game& game, Commands& commands, Session& session, HandFeedbac
     drawHandValue(current, feedback, layout, ui);
 }
 
-void drawRules(Session& session, const Interface& ui) {
+void drawRules(Session& session, const Interface& ui, const gfx::RenderSettings& settings, bool paused) {
     if (!session.rules) return;
     const auto display = ImGui::GetIO().DisplaySize;
-    ImGui::SetNextWindowPos({display.x * .5f - 310, display.y * .5f - 270});
-    ImGui::SetNextWindowSize({620, 540});
+    ImGui::SetNextWindowPos({display.x * .5f - 370, display.y * .5f - 305});
+    ImGui::SetNextWindowSize({740, 610});
     ImGui::SetNextWindowFocus();
     const bool visible=ImGui::Begin("HOW TO PLAY", &session.rules, ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoResize |
         ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse);
     if(!session.rules) playSound(audio::Sfx::UiClose);
     if(visible) {
         palace::panelFrame(ImGui::GetWindowDrawList(),ImGui::GetWindowPos(),ImGui::GetWindowSize(),true);
-        heading("THE FOOL'S TABLE", ui);
+        heading("JESTER JACK", ui);
+        ImGui::PushFont(ui.small);
+        ImGui::TextColored(gold,"IT-2502 | Yerkingali Saruar | Baibatyr Miras | Yesmagzam Sultan");
+        ImGui::PopFont();
+        if (ImGui::BeginTabBar("help-tabs")) {
+        if (ImGui::BeginTabItem("CONTROLS", nullptr, session.controlsTab ? ImGuiTabItemFlags_SetSelected : 0)) {
+            ImGui::PushFont(ui.small);
+            ImGui::Spacing();
+            ImGui::TextColored(gold,"AT THE TABLE");
+            ImGui::TextUnformatted("H / S: Hit / Stand    Space: deal, continue or speed up");
+            ImGui::TextUnformatted("1-8: inspect relic    A: activate    Q / E: choose a card");
+            ImGui::TextUnformatted("Right-drag: orbit    Wheel: zoom    Double right-click: reset");
+            ImGui::TextUnformatted("F1: help    F2: options    Escape: back");
+            ImGui::Spacing();ImGui::Separator();ImGui::Spacing();
+            ImGui::TextColored(gold,"SCENE AND LIGHT");
+            ImGui::Text("P: pause animation and play   [%s]", paused ? "PAUSED" : "RUNNING");
+            ImGui::Text("F3: Blinn-Phong lighting   [%s]",settings.lighting?"ON":"OFF");
+            ImGui::Text("F4: textures   [%s]",settings.textures?"ON":"OFF");
+            ImGui::TextUnformatted("J / L: light left / right    I / K: light away / closer");
+            ImGui::TextUnformatted("U / O: light up / down    0: reset light position");
+            ImGui::Text("Light offset: %.1f, %.1f, %.1f",settings.lightX,settings.lightY,settings.lightZ);
+            ImGui::PopFont();
+            ImGui::EndTabItem();
+        }
+        session.controlsTab=false;
+        if (ImGui::BeginTabItem("HOW TO PLAY")) {
         ImGui::PushFont(ui.small);
         ImGui::TextWrapped("Each round gives you five hands to reach the target. The Last Laugh deck adds one more.");
         ImGui::BulletText("Beat the dealer without going over 21.");
@@ -1688,7 +1735,11 @@ void drawRules(Session& session, const Interface& ui) {
         ImGui::TextWrapped("A loss or push earns no points and uses a hand. Reach the target to shop. Run out of hands below the target and the run ends.");
         ImGui::TextWrapped("Equip up to 8 relics. Click a physical chip to inspect it. Keys 1-8 inspect; A or ACTIVATE uses the selected ability; charges are limited per hand or round. A pending bust can be rescued before settlement. Shop sales return half the price.");
         ImGui::PopFont();
-        ImGui::SetCursorPosY(474);
+        ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+        }
+        ImGui::SetCursorPosY(546);
         if (backButton("GOT IT", {160, 44})) session.rules = false;
     }
     ImGui::End();
@@ -2117,9 +2168,11 @@ int main(int argc, char** argv) {
         auto volumes=audio::Preferences::load(audioSettingsPath);
         bool volumeDirty=false,volumeSaveFailed=false;
         double volumeEditedAt=0;
-        audio::Engine sound(assets / "audio", !options.hidden,volumes.music,volumes.effects);
+        audio::Engine sound(assets / "audio", !options.hidden && !options.benchmark,volumes.music,volumes.effects);
         gfx::RenderSettings settings;
         settings.animate = !options.noAmbientMotion;
+        settings.lighting = !options.lightingOff;
+        if(options.benchmark) glfwSwapInterval(0);
         settings.lightIntensity=options.light;
         if(options.cameraOverride) {settings.yaw=options.cameraYaw;settings.pitch=options.cameraPitch;settings.distance=options.cameraDistance;}
         const gfx::RenderSettings defaultView;
@@ -2183,6 +2236,13 @@ int main(int argc, char** argv) {
         int fullShopResizeFrame = -1;
         int relicHoverResizeFrame = -1;
         double previousTime = glfwGetTime();
+        bool scenePaused=false;
+        double sceneSeconds=0.0;
+        gfx::BandView heldBand;
+        double benchmarkSeconds=0.0;
+        int benchmarkFrames=0;
+        double pausedSmokeTime=0.0,pausedSmokeBeats=0.0;
+        float pausedSmokeArrival=0.0f;
         SoundScope soundScope(sound);
         int carSoundCycle=-1;
         bool carSoundActive=false;
@@ -2192,6 +2252,7 @@ int main(int argc, char** argv) {
         // The ensemble plays the soundtrack that is sounding, in time with it. Without audio (hidden runs,
         // missing files) it plays a steady demonstration groove instead of standing still.
         const auto conduct=[&](gfx::Scene& scene,float sceneTime) {
+            if(scenePaused) {scene.band=heldBand;return;}
             const auto clock=sound.musicClock();
             if(clock.track>=0&&static_cast<std::size_t>(clock.track)<soundtrackSync.size()&&!soundtrackSync[static_cast<std::size_t>(clock.track)].empty()) {
                 const auto& sync=soundtrackSync[static_cast<std::size_t>(clock.track)];
@@ -2208,10 +2269,12 @@ int main(int argc, char** argv) {
             } else {
                 scene.band.playing=false;
             }
+            heldBand=scene.band;
         };
         std::set<std::string> captured;
         std::set<std::pair<int,int>> checkedRelicLayouts;
         while (!glfwWindowShouldClose(window.handle)) {
+            const double frameStarted=glfwGetTime();
             glfwPollEvents();
             if (options.smoke) {
                 if (frame == 0 || frame == 34) glfwSetWindowSize(window.handle, 1100, 720);
@@ -2229,7 +2292,7 @@ int main(int argc, char** argv) {
                 if(relicHoverResizeFrame>=0&&frame==relicHoverResizeFrame+45) glfwSetWindowSize(window.handle,1440,900);
             }
             const double now = glfwGetTime();
-            const float dt = options.hidden && options.frames > 0 ? 1.0f / 60.0f :
+            const float dt = (options.hidden || options.benchmark) && options.frames > 0 ? 1.0f / 60.0f :
                 static_cast<float>(std::min(now - previousTime, 0.1));
             previousTime = now;
             int width = 0, height = 0;
@@ -2240,16 +2303,17 @@ int main(int argc, char** argv) {
             }
             if(options.entrancePreview && frame==1) session.start(game);
             const bool switched=session.switched;
-            session.update(dt, game);
+            const float animationDt=scenePaused?0.0f:dt;
+            session.update(animationDt, game);
             if(!switched && session.switched) {
                 timeline.reset(game.state());
                 playSound(audio::Sfx::ChipsStart); // Chips are handed to the player and the dealer.
             }
-            if(!session.menu && !session.settings && !session.rules) timeline.update(dt,session.animationSpeed);
+            if(!session.menu && !session.settings && !session.rules) timeline.update(animationDt,session.animationSpeed);
             session.history.observe(timeline.visible(),timeline.busy());
-            session.updateGameOver(dt,!session.menu && !timeline.busy() && timeline.visible().phase==bj::Phase::RunLost);
-            session.updateRelicReaction(!session.menu&&!session.settings&&!session.rules?dt:0,timeline);
-            session.updateBustReaction(dt,timeline.visible());
+            session.updateGameOver(animationDt,!session.menu && !timeline.busy() && timeline.visible().phase==bj::Phase::RunLost);
+            session.updateRelicReaction(!session.menu&&!session.settings&&!session.rules?animationDt:0,timeline);
+            session.updateBustReaction(animationDt,timeline.visible());
             if(options.lightSmoke) {
                 if(frame==8) session.settings=true;
                 if(frame==45) session.settings=false;
@@ -2305,8 +2369,8 @@ int main(int argc, char** argv) {
                     }
                 };
                 if(!options.demo) {
-                    if(frame==1||frame==6||frame==20) io.AddKeyEvent(ImGuiKey_F1,true);
-                    if(frame==2||frame==7||frame==21) io.AddKeyEvent(ImGuiKey_F1,false);
+                    if(frame==1||frame==6||frame==20) io.AddKeyEvent(ImGuiKey_F2,true);
+                    if(frame==2||frame==7||frame==21) io.AddKeyEvent(ImGuiKey_F2,false);
                     click(10,{menu.origin.x+menu.width*.5f,menu.origin.y+2*menu.step+menu.height*.5f});
                     click(50,{menu.origin.x+menu.width*.5f,menu.origin.y+2*menu.step+menu.height*.5f});
                     const float collectionX=(io.DisplaySize.x-std::min(1240.0f,io.DisplaySize.x-48))*.5f;
@@ -2395,6 +2459,20 @@ int main(int argc, char** argv) {
                     if(frame==keyFrame||frame==keyFrame+1) io.AddKeyEvent(static_cast<ImGuiKey>(ImGuiKey_1+static_cast<int>(i)),frame==keyFrame);
                 }
             }
+            if(options.controlsSmoke) {
+                auto& input=ImGui::GetIO();
+                const auto press=[&](int at,ImGuiKey key) {
+                    if(frame==at) input.AddKeyEvent(key,true);
+                    if(frame==at+1) input.AddKeyEvent(key,false);
+                };
+                press(2,ImGuiKey_F1);press(5,ImGuiKey_F1);
+                press(8,ImGuiKey_F3);press(11,ImGuiKey_F3);
+                press(14,ImGuiKey_F4);press(17,ImGuiKey_F4);
+                press(20,ImGuiKey_P);press(40,ImGuiKey_P);
+                if(frame==23) input.AddKeyEvent(ImGuiKey_L,true);
+                if(frame==30) input.AddKeyEvent(ImGuiKey_L,false);
+                press(34,ImGuiKey_0);
+            }
             ImGui::NewFrame();
             beginSoundFrame();
             hoverSoundsEnabled=!session.transitioning();
@@ -2404,9 +2482,19 @@ int main(int argc, char** argv) {
                 if(checkedRelicLayouts.insert(size).second) verifyRelicTextLayout(interface,tableLayout(display),display);
             }
             session.syncEquipmentContext(game.state());
+            if(!ImGui::GetIO().WantTextInput) {
+                if(ImGui::IsKeyPressed(ImGuiKey_P,false) && !session.transitioning()) scenePaused=!scenePaused;
+                if(ImGui::IsKeyPressed(ImGuiKey_F3,false)) settings.lighting=!settings.lighting;
+                if(ImGui::IsKeyPressed(ImGuiKey_F4,false)) settings.textures=!settings.textures;
+                if(ImGui::IsKeyPressed(ImGuiKey_0,false)) settings.lightX=settings.lightY=settings.lightZ=0;
+                const auto held=[](ImGuiKey key) {return ImGui::IsKeyDown(key)?1.0f:0.0f;};
+                settings.lightX=std::clamp(settings.lightX+(held(ImGuiKey_L)-held(ImGuiKey_J))*dt*3.0f,-8.0f,8.0f);
+                settings.lightY=std::clamp(settings.lightY+(held(ImGuiKey_U)-held(ImGuiKey_O))*dt*3.0f,-3.0f,5.0f);
+                settings.lightZ=std::clamp(settings.lightZ+(held(ImGuiKey_K)-held(ImGuiKey_I))*dt*3.0f,-8.0f,8.0f);
+            }
             const bool overlay=session.menu || session.settings || session.rules || session.collection || session.deckSelection || session.transitioning();
             const bool wasBusy=timeline.busy();
-            Commands commands{overlay || wasBusy,false,&game,&timeline};
+            Commands commands{overlay || wasBusy || scenePaused,false,&game,&timeline};
             if(ImGui::IsKeyPressed(ImGuiKey_Escape,false)) {
                 // Every Escape that steps back (closes a panel, goes up a level) plays the close sound.
                 if(session.transitioning()) {session.entrance.skip();playSound(audio::Sfx::UiClose);}
@@ -2421,15 +2509,19 @@ int main(int argc, char** argv) {
                 }
             }
             if(ImGui::IsKeyPressed(ImGuiKey_F1,false) && !session.transitioning()) {
+                session.settings=false;session.rules=!session.rules;session.controlsTab=true;
+                playSound(session.rules?audio::Sfx::UiOpen:audio::Sfx::UiClose);
+            }
+            if(ImGui::IsKeyPressed(ImGuiKey_F2,false) && !session.transitioning()) {
                 session.rules=false; session.settings=!session.settings;
                 playSound(session.settings?audio::Sfx::UiOpen:audio::Sfx::UiClose);
             }
             const bool space=ImGui::IsKeyPressed(ImGuiKey_Space,false);
             const bool gameSpace=ImGui::IsKeyDown(ImGuiKey_Space) && !session.settings && !session.rules &&
                 !session.collection && !session.deckSelection;
-            if(wasBusy && !overlay && (space || ImGui::IsMouseClicked(0))) timeline.accelerate();
-            commands.blocked=session.menu || session.settings || session.rules || session.collection || session.deckSelection || session.transitioning() || wasBusy;
-            if(!ImGui::GetIO().WantTextInput && !session.settings && !session.rules && !session.collection && !session.deckSelection && !session.transitioning() && !wasBusy) {
+            if(wasBusy && !overlay && !scenePaused && (space || ImGui::IsMouseClicked(0))) timeline.accelerate();
+            commands.blocked=session.menu || session.settings || session.rules || session.collection || session.deckSelection || session.transitioning() || wasBusy || scenePaused;
+            if(!scenePaused && !ImGui::GetIO().WantTextInput && !session.settings && !session.rules && !session.collection && !session.deckSelection && !session.transitioning() && !wasBusy) {
                 const auto owned=game.state().owned;
                 for(std::size_t i=0;i<owned.size();++i) if(ImGui::IsKeyPressed(static_cast<ImGuiKey>(ImGuiKey_1+static_cast<int>(i)),false)) {
                     session.selectedEquipment=static_cast<int>(i);session.inspectedRelic=owned[i];
@@ -2452,7 +2544,7 @@ int main(int argc, char** argv) {
                     } else primaryAction(game,commands);
                 }
             }
-            if(options.autoplay && frame>180 && frame%10==0 && !session.settings && !session.rules && !session.collection && !session.deckSelection && !session.transitioning()) {
+            if(!scenePaused && options.autoplay && frame>180 && frame%10==0 && !session.settings && !session.rules && !session.collection && !session.deckSelection && !session.transitioning()) {
                 if(timeline.busy()) timeline.accelerate();
                 else if(game.state().phase==bj::Phase::RunLost) {
                     if(session.gameOverElapsed>=1.1f) {
@@ -2462,9 +2554,10 @@ int main(int argc, char** argv) {
                 } else if(session.menu && !options.smoke) session.start(game);
                 else autoplayStep(game,commands);
             }
-            feedback.observe(settledState(timeline),dt,!session.menu && !session.transitioning());
+            feedback.observe(settledState(timeline),animationDt,!session.menu && !session.transitioning());
             session.syncEquipmentContext(game.state());
-            const float sceneTime=options.hidden && options.frames>0 ? frame/60.0f : static_cast<float>(now);
+            const float sceneTime=static_cast<float>(sceneSeconds);
+            effectTime=sceneTime;
             auto scene=makeScene(timeline,sceneTime,session);
             conduct(scene,sceneTime);
             drawPhysicalEquipment(scene,settings,width,height,game,commands,session,interface);
@@ -2474,6 +2567,7 @@ int main(int argc, char** argv) {
             else drawTable(game,commands,session,feedback,interface,art,window.handle,timeline,settings.animate);
             drawCardChoices(game,commands,interface,session);
             drawDeckSelection(game,session,interface,art);
+            if(session.transitioning()) scenePaused=false;
             drawCollection(session,interface,art);
             if(drawSettings(session,settings,interface,volumes,volumeSaveFailed)) {
                 sound.setVolumes(volumes.music,volumes.effects);
@@ -2481,7 +2575,7 @@ int main(int argc, char** argv) {
                 volumeEditedAt=now;
                 volumeSaveFailed=false;
             }
-            drawRules(session,interface);
+            drawRules(session,interface,settings,scenePaused);
             ImGui::EndDisabled();
             // Apply while dragging; save on release, close, or after keyboard edits settle.
             if(volumeDirty&&(!session.settings||ImGui::IsMouseReleased(0)||
@@ -2496,7 +2590,7 @@ int main(int argc, char** argv) {
             sound.setMusic(session.menu&&!session.transitioning()?audio::MusicMode::Menu:audio::MusicMode::Game);
             sound.setDucked(!session.menu&&session.gameOverElapsed>0.0f);
             // The same street phase drives rendering and the recording; its peak matches the midpoint.
-            if(session.menu&&settings.animate&&!session.transitioning()&&presentation::CarPass::visible(sceneTime)) {
+            if(session.menu&&settings.animate&&!scenePaused&&!session.transitioning()&&presentation::CarPass::visible(sceneTime)) {
                 const int cycle=static_cast<int>(sceneTime/presentation::CarPass::cycleSeconds);
                 if(carSoundCycle!=cycle) {
                     sound.carPass(presentation::CarPass::recordingOffset(sceneTime));
@@ -2581,7 +2675,34 @@ int main(int argc, char** argv) {
             drawGameplayShading(session,timeline);
             scene=makeScene(timeline,sceneTime,session);
             conduct(scene,sceneTime);
+            if(options.controlsSmoke) {
+                if(frame==3&&!session.rules) throw std::runtime_error("F1 did not open help");
+                if(frame==6&&session.rules) throw std::runtime_error("F1 did not close help");
+                if(frame==9&&settings.lighting) throw std::runtime_error("F3 did not disable lighting");
+                if(frame==12&&!settings.lighting) throw std::runtime_error("F3 did not restore lighting");
+                if(frame==15&&settings.textures) throw std::runtime_error("F4 did not disable textures");
+                if(frame==18&&!settings.textures) throw std::runtime_error("F4 did not restore textures");
+                if(frame==21) {
+                    if(!scenePaused) throw std::runtime_error("P did not pause the scene");
+                    pausedSmokeTime=sceneSeconds;pausedSmokeBeats=scene.band.beats;pausedSmokeArrival=timeline.playerArrival();
+                }
+                if(frame>21&&frame<40&&(sceneSeconds!=pausedSmokeTime||scene.band.beats!=pausedSmokeBeats||timeline.playerArrival()!=pausedSmokeArrival))
+                    throw std::runtime_error("Scene, band or card animation moved while paused");
+                if(frame==31&&settings.lightX<.2f) throw std::runtime_error("Light movement did not work while paused");
+                if(frame==35&&settings.lightX!=0) throw std::runtime_error("Light reset failed");
+                if(frame==43&&(scenePaused||sceneSeconds<=pausedSmokeTime)) throw std::runtime_error("P did not resume the scene");
+            }
             renderer.render(scene,settings,width,height);
+            if(!session.transitioning()) {
+                std::ostringstream status;
+                status<<"F1 Help  |  F3 Lighting "<<(settings.lighting?"ON":"OFF")
+                    <<"  |  F4 Textures "<<(settings.textures?"ON":"OFF")
+                    <<"  |  "<<(scenePaused?"PAUSED - P to resume":"P Pause");
+                auto* foreground=ImGui::GetForegroundDrawList();
+                const auto color=scenePaused?IM_COL32(240,199,124,245):IM_COL32(196,189,176,210);
+                foreground->AddText(interface.small,16.0f,{16,2},IM_COL32(0,0,0,220),status.str().c_str());
+                foreground->AddText(interface.small,16.0f,{15,1},color,status.str().c_str());
+            }
             if(session.transitioning() && session.menu) ImGui::GetForegroundDrawList()->AddText({24,24},IM_COL32(242,218,175,160),"ESC / SKIP ENTRANCE");
             if (session.transitioning()) ImGui::GetForegroundDrawList()->AddRectFilled(
                 {0, 0}, ImGui::GetIO().DisplaySize, IM_COL32(0, 0, 0, static_cast<int>(255 * session.darkness())));
@@ -2682,6 +2803,11 @@ int main(int argc, char** argv) {
             const bool finished = options.frames > 0 && frame >= options.frames;
             if (finished && !options.screenshot.empty()) saveScreenshot(options.screenshot, width, height);
             glfwSwapBuffers(window.handle);
+            if(options.benchmark) {
+                glFinish();
+                if(frame>60) {benchmarkSeconds+=glfwGetTime()-frameStarted;++benchmarkFrames;}
+            }
+            if(!scenePaused) sceneSeconds+=dt;
             if (finished) {
                 if(options.smoke && !options.demo && frame>=400 && (!smokeCollection || !smokeDeck || !smokeDealt || !smokeStood))
                     throw std::runtime_error("Smoke traversal incomplete");
@@ -2695,6 +2821,17 @@ int main(int argc, char** argv) {
         }
         if(volumeDirty&&!audioSettingsPath.empty()) volumes.save(audioSettingsPath);
         std::cout << "Rendered frames: " << frame << '\n';
+        if(options.controlsSmoke) {
+            if(frame<44) throw std::runtime_error("Scene controls check ended before all assertions ran");
+            std::cout<<"Scene controls: help, lighting, textures, pause/resume and movable light passed\n";
+        }
+        if(options.benchmark&&benchmarkFrames>0) {
+            std::cout<<"GPU: "<<reinterpret_cast<const char*>(glGetString(GL_RENDERER))<<'\n'
+                <<"OpenGL: "<<reinterpret_cast<const char*>(glGetString(GL_VERSION))<<'\n'
+                <<"Benchmark 1280x720, lighting="<<(settings.lighting?"on":"off")
+                <<", frames="<<benchmarkFrames<<", mean ms="<<std::fixed<<std::setprecision(2)
+                <<benchmarkSeconds*1000.0/benchmarkFrames<<", FPS="<<benchmarkFrames/benchmarkSeconds<<'\n';
+        }
         if(options.smoke) std::cout << "Smoke: collection="<<smokeCollection<<" decks="<<smokeDeck
             <<" dealt="<<smokeDealt<<" resolved="<<smokeStood<<" revived="<<smokeRevived
             <<" max relics="<<maxOwned<<" max round="<<maxRound

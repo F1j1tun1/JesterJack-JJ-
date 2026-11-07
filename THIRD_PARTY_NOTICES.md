@@ -18,7 +18,7 @@ glm   1.0.1    09c5716296787e1f7fcb87b1cbdbf26814ec1288ed6259ccd30d5d9795809fa5
 imgui 1.91.9b  fd37507c8476a6d14cc7c4b352401f31bcbd0f0d995d35390811e968c466f46e
 ```
 
-The game uses its own procedural meshes and textures; no Balatro artwork, audio or source code is included. Select the license for your team's own code before publicly publishing the repository.
+The project includes procedural geometry, texture assets and supplied audio recordings. The library and font sources are recorded below; the recording sources remain unverified as described in the audio section. A license for the project's own source code has not been specified.
 
 ## Jester Jack fonts
 
